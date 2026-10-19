@@ -1,0 +1,16 @@
+[package]
+name = "keyv-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "KeyV — Vietnamese input engine core: Telex/VNI finite-state machine. Clean-room implementation, no GPL-derived code."
+keywords = ["vietnamese", "input-method", "telex", "vni", "ime"]
+categories = ["text-processing"]
+
+[lib]
+name = "keyv_core"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# P1: pure logic, zero dependencies by design (keeps multi-arch builds frictionless).

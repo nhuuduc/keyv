@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>KeyV</string>
+	<key>CFBundleDisplayName</key>
+	<string>KeyV</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.keyv.host</string>
+	<key>CFBundleVersion</key>
+	<string>0.2.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleExecutable</key>
+	<string>KeyVApp</string>
+	<key>CFBundleIconFile</key>
+	<string>KeyV</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- Menu-bar accessory: no Dock icon (LSUIElement). -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>KeyV posts composed Vietnamese text to the app you are typing in.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>KeyV reads the selection cache to rewrite composed words safely.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

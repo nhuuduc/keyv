@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>KeyV</string>
+	<key>CFBundleDisplayName</key>
+	<string>KeyV</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.keyv.inputmethod</string>
+	<key>CFBundleVersion</key>
+	<string>0.2.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleExecutable</key>
+	<string>KeyVIME</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- Input Method contract: one input mode exposing the KeyV IME. -->
+	<key>TISIntendedLanguage</key>
+	<string>vi</string>
+	<key>ComponentInputModeDict</key>
+	<dict>
+		<key>tsInputModeListKey</key>
+		<dict>
+			<key>com.apple.inputmethod.keyv.vietnamese</key>
+			<dict>
+				<key>tsInputModeID</key>
+				<string>com.apple.inputmethod.keyv.vietnamese</string>
+				<key>tsInputModeNameKey</key>
+				<string>KeyV Vietnamese</string>
+				<key>tsInputModePrimaryLanguageKey</key>
+				<string>vi</string>
+				<key>tsInputModeMenuIconFileKey</key>
+				<string></string>
+				<key>tsInputModeScriptKey</key>
+				<string>Unicode</string>
+				<key>tsInputModeDefaultStateKey</key>
+				<true/>
+			</dict>
+		</dict>
+		<key>tsVisibleInputModeOrderedArrayKey</key>
+		<array>
+			<string>com.apple.inputmethod.keyv.vietnamese</string>
+		</array>
+		<key>tsInputModePaletteKey</key>
+		<dict/>
+	</dict>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
