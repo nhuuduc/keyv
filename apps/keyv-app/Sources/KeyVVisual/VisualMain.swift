@@ -224,6 +224,20 @@ struct KeyVVisualHarness {
         }
         let which = CommandLine.arguments[1]
 
+        if which == "settings-window" {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "KeyV — Xem trước cài đặt"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: SettingsRootView())
+            window.center()
+            NSApp.setActivationPolicy(.regular)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.run()
+            return
+        }
+
         switch which {
         case "settings":
             renderPNG(SettingsRootView(), size: NSSize(width: 680, height: 540), name: "kv_settings.png")

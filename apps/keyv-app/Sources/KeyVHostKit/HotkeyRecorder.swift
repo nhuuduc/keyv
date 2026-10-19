@@ -12,7 +12,7 @@ final class HotkeyRecorderView: NSView {
 
     init(keyCode: Int, carbonModifiers: UInt) {
         currentKeyName = HotkeyRecorderView.describe(keyCode: keyCode, carbonModifiers: carbonModifiers)
-        super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 30))
+        super.init(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
         wantsLayer = true
         redraw()
     }
@@ -24,7 +24,7 @@ final class HotkeyRecorderView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 30) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 230, height: 32) }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -112,24 +112,22 @@ final class HotkeyRecorderView: NSView {
         return m
     }
 
+    private static func modifierNames(_ mask: UInt) -> [String] {
+        var names: [String] = []
+        if mask & UInt(controlKey) != 0 { names.append("Control") }
+        if mask & UInt(optionKey) != 0 { names.append("Option") }
+        if mask & UInt(shiftKey) != 0 { names.append("Shift") }
+        if mask & UInt(cmdKey) != 0 { names.append("Command") }
+        return names
+    }
+
     static func describe(keyCode: Int, carbonModifiers mask: UInt) -> String {
-        var s = ""
-        if mask & UInt(controlKey) != 0 { s += "⌃" }
-        if mask & UInt(optionKey) != 0 { s += "⌥" }
-        if mask & UInt(shiftKey) != 0 { s += "⇧" }
-        if mask & UInt(cmdKey) != 0 { s += "⌘" }
-        s += keyName(keyCode: keyCode)
-        return s
+        (modifierNames(mask) + [keyName(keyCode: keyCode)]).joined(separator: " + ")
     }
 
     static func describeOn(keyCode: Int, carbonModifiers mask: UInt, charactersHint: String?) -> String {
         if let hint = charactersHint, !hint.isEmpty, hint.uppercased() != " " {
-            var s = ""
-            if mask & UInt(controlKey) != 0 { s += "⌃" }
-            if mask & UInt(optionKey) != 0 { s += "⌥" }
-            if mask & UInt(shiftKey) != 0 { s += "⇧" }
-            if mask & UInt(cmdKey) != 0 { s += "⌘" }
-            return s + hint.uppercased()
+            return (modifierNames(mask) + [hint.uppercased()]).joined(separator: " + ")
         }
         return describe(keyCode: keyCode, carbonModifiers: mask)
     }

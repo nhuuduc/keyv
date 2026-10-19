@@ -43,7 +43,7 @@ public struct SettingsRootView: View {
                     .tabItem { Text("Thông tin") }
             }
         }
-        .frame(width: 680, height: 540)
+        .frame(width: 680, height: 620)
     }
 }
 
@@ -53,59 +53,63 @@ private struct ControlPanelSection: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
-        GroupBox(label: Text("Điều khiển").font(.headline)) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text("Kiểu gõ:").frame(width: 72, alignment: .leading)
-                        Picker("", selection: $model.method) {
+        VStack(spacing: 12) {
+            GroupBox {
+                HStack(alignment: .top, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Ngôn ngữ đang gõ", systemImage: "keyboard")
+                            .font(.headline)
+                        Picker("Ngôn ngữ", selection: $model.isEnglishMode) {
+                            Text("Tiếng Việt").tag(false)
+                            Text("English").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text("Có thể đổi trong menu V/E trên thanh menu macOS.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Kiểu gõ", selection: $model.method) {
                             Text("Telex").tag(ViInputMethod.telex)
                             Text("Simple Telex").tag(ViInputMethod.simpleTelex)
                             Text("VNI").tag(ViInputMethod.vni)
-                            Text("Tắt").tag(ViInputMethod.off)
+                            Text("Tắt (English)").tag(ViInputMethod.off)
                         }
-                        .labelsHidden()
-                        .frame(width: 150)
+                        Toggle("Bíp khi đổi Việt / Anh từ menu", isOn: $model.beepOnModeSwitch)
+                            .toggleStyle(.checkbox)
+                        Text("Bảng mã: Unicode")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-
-                    HStack(spacing: 8) {
-                        Text("Bảng mã:").frame(width: 72, alignment: .leading)
-                        Picker("", selection: .constant(0)) {
-                            Text("Unicode").tag(0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 150)
-                        .disabled(true)   // chỉ hỗ trợ Unicode
-                    }
-
-                    HStack(spacing: 8) {
-                        Text("Clipboard:").frame(width: 72, alignment: .leading)
-                        HotkeyRecorder(keyCode: $model.overlayHotKeyCode, modifiers: $model.overlayHotKeyModifierMask)
-                        .frame(width: 150, height: 30)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Chế độ gõ").font(.subheadline).bold()
-                    Picker("", selection: $model.isEnglishMode) {
-                        Text("Tiếng Việt").tag(false)
-                        Text("English").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                    .labelsHidden()
-                    .horizontalRadioGroupLayout()
-
-                    Toggle("Phát âm khi chuyển chế độ", isOn: $model.beepOnModeSwitch)
-                        .toggleStyle(.checkbox)
-                    Text("Chuyển ngôn ngữ qua biểu tượng V/E trên thanh menu.")
-                        .fixedSize(horizontal: false, vertical: true)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                .padding(10)
             }
-            .padding(8)
+
+            GroupBox {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label("Mở lịch sử clipboard", systemImage: "doc.on.clipboard")
+                            .font(.headline)
+                        Text("Xem lại nội dung đã sao chép.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 5) {
+                        HotkeyRecorder(keyCode: $model.overlayHotKeyCode,
+                                       modifiers: $model.overlayHotKeyModifierMask)
+                            .frame(width: 230, height: 32)
+                            .help("Bấm để đổi phím tắt. Nhấn Esc để hủy.")
+                        Text("Bấm vào phím tắt để thay đổi")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+            }
         }
-        .padding([.horizontal, .top])
+        .padding([.horizontal, .top], 20)
     }
 }
 

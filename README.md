@@ -6,7 +6,10 @@ Bộ gõ tiếng Việt trên thanh menu, kết hợp lịch sử clipboard, vi�
 
 > **Đang phát triển.** KeyV hướng đến thói quen gõ UniKey trên Windows nhưng chưa tương thích hoàn toàn. Hiện phát hành mã nguồn; chưa có bản cài đặt được notarize hay bộ kiểm thử gõ thật đầy đủ trên mọi ứng dụng.
 
-![Giao diện bộ gõ KeyV](docs/screenshots/typing.png)
+Giao diện cài đặt mới tách **Ngôn ngữ đang gõ** khỏi **Mở lịch sử clipboard**.
+Phím tắt hiển thị bằng tên phím đầy đủ, ví dụ **Option + Space**, kèm hướng dẫn bấm để đổi.
+
+![Giao diện bộ gõ KeyV ở bản trước khi tách khối điều khiển](docs/screenshots/typing.png)
 
 ## Tính năng
 
@@ -23,7 +26,7 @@ Bộ gõ tiếng Việt trên thanh menu, kết hợp lịch sử clipboard, vi�
 
 ## Ảnh giao diện
 
-Ảnh chụp cửa sổ ứng dụng đang chạy trên macOS, không phải bản vẽ giao diện. Các sửa engine mới nhất trong mã nguồn không làm thay đổi bố cục này. Không đưa nội dung clipboard cá nhân lên repository.
+Các ảnh dưới đây chụp bản trước khi tách khối điều khiển ngôn ngữ và clipboard; bố cục phần trên chưa phản ánh thay đổi mới nhất. Đây là ảnh cửa sổ ứng dụng thật trên macOS. Các sửa engine mới nhất trong mã nguồn không làm thay đổi bố cục này. Không đưa nội dung clipboard cá nhân lên repository.
 
 ### Cài đặt riêng cho ứng dụng
 
