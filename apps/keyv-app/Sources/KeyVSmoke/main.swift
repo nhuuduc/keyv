@@ -1,4 +1,5 @@
 import Foundation
+import Carbon.HIToolbox
 import KeyVCore
 import KeyVHostKit
 import AppKit
@@ -135,7 +136,7 @@ check(screen("e11", method: .vni), "e1", "VNI repeated tone escape")
 do {
     let v020 = SemVer(parsing: "0.2.0")
     let v030 = SemVer(parsing: "v0.3.0")
-    let v030Beta = SemVer(parsing: "v0.3.0-beta.1")
+    let v030Beta = SemVer(parsing: "0.3.0-beta.1")
     let v031 = SemVer(parsing: "0.3.1+build42")
     check(v020 != nil && v030 != nil && v030Beta != nil && v031 != nil ? "ok" : "nil", "ok", "SemVer parsing")
     if let v020, let v030, let v030Beta, let v031 {
@@ -158,7 +159,7 @@ do {
     )
 }
 
-// Host settings regressions use the smoke executable's defaults, never app.keyv.host.
+// Host settings + UI controller regressions use the smoke executable's defaults, never app.keyv.host.
 MainActor.assumeIsolated {
     let defaults = UserDefaults.standard
     let domain = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
@@ -185,10 +186,45 @@ MainActor.assumeIsolated {
     check(row?.methodRaw == nil && row?.orthoRaw == 1 ? "ok" : "bad", "ok", "clear method keeps orthography")
     model.updateRow(id: "test.keyv", methodRaw: nil, orthoRaw: nil)
     check(model.rows.contains { $0.id == "test.keyv" } ? "bad" : "ok", "ok", "clear final override returns to global")
+
+    check(
+        HotkeyRecorderView.describe(keyCode: 49, carbonModifiers: UInt(optionKey)),
+        "Option + Space",
+        "HotkeyRecorder full label"
+    )
+    check(
+        HotkeyRecorderView.compactDescribe(keyCode: 6, carbonModifiers: UInt(optionKey)),
+        "⌥ Z",
+        "HotkeyRecorder compact label"
+    )
+    check(
+        HotkeyRecorderView.compactDescribe(keyCode: 49, carbonModifiers: UInt(controlKey | shiftKey)),
+        "⌃⇧ Space",
+        "HotkeyRecorder compact multi-modifier label"
+    )
+    check(
+        HotkeyRecorderView.menuKeyEquivalent(for: 6) ?? "",
+        "z",
+        "HotkeyRecorder lowercase menu keyEquivalent"
+    )
+
+    let picker = PickerController()
+    picker.entries = [
+        ClipboardEntry(id: 1, kind: .text, createdAt: Date(), sourceBundleID: "com.apple.TextEdit", text: "Xin chào KeyV trên macOS"),
+        ClipboardEntry(id: 2, kind: .fileURL, createdAt: Date(), sourceBundleID: "com.apple.Finder", fileURL: URL(fileURLWithPath: "/tmp/bao-cao-tai-chinh.pdf")),
+        ClipboardEntry(id: 3, kind: .text, createdAt: Date(), sourceBundleID: "com.tinyspeck.slackmacgap", text: "Release notes v0.3.0"),
+    ]
+    picker.selectionIndex = 2
+    picker.searchQuery = "bao-cao"
+    check(String(picker.filteredEntries.count), "1", "PickerController filters by file name")
+    check(String(picker.selectionIndex), "0", "PickerController resets selection on search")
+    check(picker.handleEscape() ? "close" : "clear", "clear", "PickerController first Esc clears searchQuery")
+    check(String(picker.filteredEntries.count), "3", "PickerController restores entries after clearing query")
+    check(picker.handleEscape() ? "close" : "clear", "close", "PickerController second Esc closes panel")
 }
 
 if failures.isEmpty {
-    print("KeyVSmoke: ALL PASS (engine + UniKey parity + updater + host settings regressions)")
+    print("KeyVSmoke: ALL PASS (engine + UniKey parity + updater + host settings & UI regressions)")
 } else {
     for f in failures { print("FAIL: \(f)") }
     exit(1)

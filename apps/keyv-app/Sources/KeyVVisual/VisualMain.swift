@@ -9,22 +9,43 @@ import KeyVHostKit
 // Run manually only; not part of the shipped app.
 
 @MainActor
-private func renderPNG<V: View>(_ view: V, size: NSSize, name: String) {
-
-
+private func renderPNG<V: View>(_ view: V, size: NSSize, name: String, dark: Bool = false) {
     print("render \(name)", terminator: "\n"); fflush(stdout)
-    let renderer = ImageRenderer(content: view)
-    renderer.proposedSize = ProposedViewSize(width: size.width, height: size.height)
-    renderer.scale = 2
-    guard let img = renderer.nsImage else {
-        print("render nil for \(name)", terminator: "\n"); fflush(stdout)
+    let appearanceName: NSAppearance.Name = dark ? .darkAqua : .aqua
+    let appearance = NSAppearance(named: appearanceName)
+    NSApp.appearance = appearance
+    let colorScheme: ColorScheme = dark ? .dark : .light
+    let hosted = view.environment(\.colorScheme, colorScheme)
+
+    let hosting = NSHostingView(rootView: hosted)
+    hosting.frame = NSRect(origin: .zero, size: size)
+    hosting.appearance = appearance
+
+    let window = NSWindow(
+        contentRect: NSRect(origin: .zero, size: size),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    window.appearance = appearance
+    window.isReleasedWhenClosed = false
+    window.contentView = hosting
+    hosting.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+    hosting.layoutSubtreeIfNeeded()
+
+    guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+        print("bitmap rep nil for \(name)", terminator: "\n"); fflush(stdout)
         return
     }
-    guard let tiff = img.tiffRepresentation,
-          let rep = NSBitmapImageRep(data: tiff) else {
-        print("tiff nil for \(name)", terminator: "\n"); fflush(stdout)
-        return
+    if let appearance {
+        appearance.performAsCurrentDrawingAppearance {
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        }
+    } else {
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
     }
+
     guard let png = rep.representation(using: .png, properties: [:]) else {
         print("png nil for \(name)", terminator: "\n"); fflush(stdout)
         return
@@ -35,10 +56,7 @@ private func renderPNG<V: View>(_ view: V, size: NSSize, name: String) {
     } catch {
         print("WRITE ERR \(name): \(error)", terminator: "\n"); fflush(stdout)
     }
-    // Drain the SwiftUI update cycle so the next ImageRenderer has a
-    // transaction to enqueue into (otherwise SwiftUICore traps).
-    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.04))
 }
 
 private struct TypingPreview: View {
@@ -75,40 +93,43 @@ private struct TypingPreview: View {
                 Label("Phím mở Clipboard history", systemImage: "doc.on.clipboard")
                     .font(.headline)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("⌥Space")
+                Text("⌥ Space")
                     .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 6)
-                    .background(Color(white: 0.92))
+                    .background(Color(nsColor: .controlBackgroundColor))
                     .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(white: 0.75)))
-                Text("Click vào đây rồi nhấn tổ hợp phím mới…")
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+                Text("Nhấp vào đây rồi nhấn tổ hợp phím mới…")
                     .font(.footnote)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(6)
         }
         .padding()
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
 private struct AppsPreview: View {
     var body: some View {
         SettingsAppsTab(model: .shared)
+            .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
 private struct OverlayRowsPreview: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PickerRow(entry: ClipboardEntry(id: 1, kind: .text, createdAt: Date(), sourceBundleID: "com.apple.TextEdit", text: "Hôm nay trời đẹp — minutes of meeting…"))
-            PickerRow(entry: ClipboardEntry(id: 2, kind: .image, createdAt: Date(), sourceBundleID: "com.apple.Screenshot"))
+        VStack(alignment: .leading, spacing: 4) {
+            PickerRow(entry: ClipboardEntry(id: 1, kind: .text, createdAt: Date(), sourceBundleID: "com.apple.TextEdit", text: "Hôm nay trời đẹp — minutes of meeting…"), isSelected: true)
+            PickerRow(entry: ClipboardEntry(id: 2, kind: .image, createdAt: Date(), sourceBundleID: "com.apple.Screenshot", imageData: Data(count: 49_152)))
             PickerRow(entry: ClipboardEntry(id: 3, kind: .fileURL, createdAt: Date(), sourceBundleID: "com.apple.Finder", fileURL: URL(fileURLWithPath: "/Users/you/Downloads/bao-cao-quy3.key")))
-            PickerRow(entry: ClipboardEntry(id: 4, kind: .text, createdAt: Date(), sourceBundleID: "slack", text: "fix: đổi mode qua ⌥Space rồi gõ thử 'ddawng' = đăng như TestNote…"))
+            PickerRow(entry: ClipboardEntry(id: 4, kind: .text, createdAt: Date(), sourceBundleID: "com.tinyspeck.slackmacgap", text: "fix: đổi mode qua ⌥Space rồi gõ thử 'ddawng' = đăng như TestNote…"))
             Spacer()
         }
-        .background(Color(white: 0.12))
+        .padding(8)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -124,7 +145,7 @@ private struct SettingsLitePreview: View {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 8) {
-                            Text("Kiểu gõ:").frame(width: 72, alignment: .leading)
+                            Text("Kiểu gõ:").frame(width: 78, alignment: .leading)
                             Picker("", selection: $model.method) {
                                 Text("Telex").tag(ViInputMethod.telex)
                                 Text("Simple Telex").tag(ViInputMethod.simpleTelex)
@@ -134,17 +155,19 @@ private struct SettingsLitePreview: View {
                             .labelsHidden().frame(width: 150)
                         }
                         HStack(spacing: 8) {
-                            Text("Bảng mã:").frame(width: 72, alignment: .leading)
+                            Text("Bảng mã:").frame(width: 78, alignment: .leading)
                             Picker("", selection: .constant(0)) { Text("Unicode").tag(0) }
                                 .labelsHidden().frame(width: 150).disabled(true)
                         }
                         HStack(spacing: 8) {
-                            Text("Phím chuyển:").frame(width: 72, alignment: .leading)
-                            Text("⌥Space")
+                            Text("Phím chuyển:").frame(width: 78, alignment: .leading)
+                            Text("⌥ Z")
                                 .font(.system(size: 12, weight: .medium))
-                                .padding(.horizontal, 10).padding(.vertical, 3)
-                                .background(Color(white: 0.92)).cornerRadius(5)
-                            Toggle("Kêu beep", isOn: $model.beepOnModeSwitch)
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+                            Toggle("Âm báo", isOn: $model.beepOnModeSwitch)
                                 .toggleStyle(.checkbox).font(.footnote)
                         }
                     }
@@ -157,7 +180,7 @@ private struct SettingsLitePreview: View {
                         .pickerStyle(.radioGroup).labelsHidden()
                         .horizontalRadioGroupLayout()
                         Text("Chuyển nhanh: menu bar V/E hoặc phím chuyển")
-                            .font(.caption).foregroundColor(.secondary)
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(8)
@@ -177,32 +200,28 @@ private struct SettingsLitePreview: View {
                 engineLite
             }
         }
-        .frame(width: 560, height: 470)
+        .frame(width: 640, height: 500)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var engineLite: some View {
         Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
             GridRow {
-                Toggle("Đặt dấu oa, úy (thay vì oà, uý)", isOn: .constant(true)).toggleStyle(.checkbox)
-                Toggle("Kiểm tra chính tả", isOn: .constant(false)).toggleStyle(.checkbox).disabled(true)
+                Toggle("Đặt dấu òa, úy (thay vì oà, uý)", isOn: .constant(true)).toggleStyle(.checkbox)
+                Toggle("Kiểm tra chính tả tiếng Việt", isOn: .constant(true)).toggleStyle(.checkbox)
             }
             GridRow {
-                Toggle("Sửa lỗi gõ ý (trình duyệt, Excel,…)", isOn: .constant(true)).toggleStyle(.checkbox)
-                Toggle("Tự khôi phục phím đã gõ sai", isOn: .constant(true)).toggleStyle(.checkbox)
+                Toggle("Tương thích gợi ý tự động", isOn: .constant(true)).toggleStyle(.checkbox)
+                Toggle("Tự khôi phục phím khi gõ lặp", isOn: .constant(true)).toggleStyle(.checkbox)
             }
             GridRow {
-                Toggle("Viết Hoa chữ cái đầu câu", isOn: .constant(false)).toggleStyle(.checkbox)
-                Toggle("Cho phép \"z w j f\" làm phím âm", isOn: .constant(true)).toggleStyle(.checkbox)
-            }
-            GridRow {
-                Toggle("Chuyển chế độ thông minh", isOn: .constant(false)).toggleStyle(.checkbox).disabled(true)
-                Toggle("Tự ghi nhớ bảng mã theo ứng dụng", isOn: .constant(false)).toggleStyle(.checkbox).disabled(true)
+                Toggle("Tự động viết hoa đầu câu", isOn: .constant(false)).toggleStyle(.checkbox)
+                Toggle("Giữ phím W đầu từ làm phụ âm", isOn: .constant(true)).toggleStyle(.checkbox)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
     }
-
 }
 
 private func typingPreview() -> some View { TypingPreview() }
@@ -219,50 +238,60 @@ struct KeyVVisualHarness {
         // ImageRenderer's SwiftUI update cycle only survives one render
         // per process — run one view per invocation (see README note).
         guard CommandLine.arguments.count >= 2 else {
-            print("usage: KeyVVisual <settings|onboarding|overlay>", terminator: "\n"); fflush(stdout)
+            print("usage: KeyVVisual <settings|onboarding|overlay|update>", terminator: "\n"); fflush(stdout)
             exit(2)
         }
         let which = CommandLine.arguments[1]
 
         if which == "settings-window" {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 650),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "KeyV — Xem trước cài đặt"
+            window.minSize = NSSize(width: 700, height: 620)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: SettingsRootView())
             window.center()
-            NSApp.setActivationPolicy(.regular)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            WindowFocusCoordinator.shared.present(window)
             NSApp.run()
             return
         }
 
+        let isDark = CommandLine.arguments.contains("--dark")
+        let suffix = isDark ? "_dark" : ""
+
         switch which {
         case "settings":
-            renderPNG(SettingsRootView(), size: NSSize(width: 680, height: 540), name: "kv_settings.png")
+            renderPNG(SettingsRootView(initialTab: .engine).background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 720, height: 650), name: "kv_settings\(suffix).png", dark: isDark)
+        case "settings-apps":
+            renderPNG(SettingsRootView(initialTab: .apps).background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 720, height: 650), name: "kv_settings_apps\(suffix).png", dark: isDark)
+        case "settings-macros":
+            renderPNG(SettingsRootView(initialTab: .macros).background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 720, height: 650), name: "kv_settings_macros\(suffix).png", dark: isDark)
+        case "settings-system":
+            renderPNG(SettingsRootView(initialTab: .system).background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 720, height: 650), name: "kv_settings_system\(suffix).png", dark: isDark)
+        case "settings-about":
+            renderPNG(SettingsRootView(initialTab: .about).background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 720, height: 650), name: "kv_settings_about\(suffix).png", dark: isDark)
         case "settingslite":
-            renderPNG(SettingsLitePreview(), size: NSSize(width: 560, height: 470), name: "kv_settings_lite.png")
+            renderPNG(SettingsLitePreview(), size: NSSize(width: 640, height: 500), name: "kv_settings_lite\(suffix).png", dark: isDark)
         case "onboarding":
-            renderPNG(OnboardingView(), size: NSSize(width: 520, height: 540), name: "kv_onboarding.png")
+            renderPNG(OnboardingView().background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 540, height: 560), name: "kv_onboarding\(suffix).png", dark: isDark)
+        case "update":
+            renderPNG(UpdateWindowView().background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 520, height: 390), name: "kv_update\(suffix).png", dark: isDark)
         case "typing":
-            // Tab content w/o the NSViewRepresentable recorder (ImageRenderer
-            // cannot rasterize those; the real app renders them fine).
-            renderPNG(typingPreview(), size: NSSize(width: 520, height: 380), name: "kv_typing.png")
+            renderPNG(typingPreview(), size: NSSize(width: 540, height: 380), name: "kv_typing\(suffix).png", dark: isDark)
         case "apps":
-            renderPNG(appsPreview(), size: NSSize(width: 520, height: 380), name: "kv_apps.png")
+            renderPNG(appsPreview(), size: NSSize(width: 640, height: 420), name: "kv_apps\(suffix).png", dark: isDark)
         case "overlayrows":
-            renderPNG(overlayRowsPreview(), size: NSSize(width: 560, height: 420), name: "kv_overlayrows.png")
+            renderPNG(overlayRowsPreview(), size: NSSize(width: 580, height: 440), name: "kv_overlayrows\(suffix).png", dark: isDark)
         case "overlay":
             let controller = PickerController()
             controller.entries = [
                 ClipboardEntry(id: 1, kind: .text, createdAt: Date(), sourceBundleID: "com.apple.TextEdit", text: "Hôm nay trời đẹp — minutes of meeting…"),
-                ClipboardEntry(id: 2, kind: .image, createdAt: Date(), sourceBundleID: "com.apple.Screenshot"),
+                ClipboardEntry(id: 2, kind: .image, createdAt: Date(), sourceBundleID: "com.apple.Screenshot", imageData: Data(count: 49_152)),
                 ClipboardEntry(id: 3, kind: .fileURL, createdAt: Date(), sourceBundleID: "com.apple.Finder", fileURL: URL(fileURLWithPath: "/Users/you/Downloads/bao-cao-quy3.key")),
-                ClipboardEntry(id: 4, kind: .text, createdAt: Date(), sourceBundleID: "slack", text: "fix: đổi mode qua ⌥Space rồi gõ thử 'ddawng' = đăng như TestNote…"),
+                ClipboardEntry(id: 4, kind: .text, createdAt: Date(), sourceBundleID: "com.tinyspeck.slackmacgap", text: "fix: đổi mode qua ⌥Space rồi gõ thử 'ddawng' = đăng như TestNote…"),
             ]
             controller.selectionIndex = 0
-            renderPNG(PickerList(controller: controller), size: NSSize(width: 560, height: 420), name: "kv_overlay.png")
+            renderPNG(PickerList(controller: controller), size: NSSize(width: 580, height: 440), name: "kv_overlay\(suffix).png", dark: isDark)
         default:
             exit(2)
         }

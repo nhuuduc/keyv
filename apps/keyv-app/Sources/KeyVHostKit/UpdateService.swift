@@ -273,7 +273,7 @@ public final class UpdateService: ObservableObject {
     public func presentUpdateWindow() {
         if updateWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 480, height: 340),
+                contentRect: NSRect(x: 0, y: 0, width: 520, height: 390),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
@@ -284,8 +284,9 @@ public final class UpdateService: ObservableObject {
             window.contentView = NSHostingView(rootView: UpdateWindowView(service: self))
             updateWindow = window
         }
-        updateWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if let updateWindow {
+            WindowFocusCoordinator.shared.present(updateWindow)
+        }
     }
 
     public func checkForUpdates(userInitiated: Bool) async {
@@ -375,7 +376,7 @@ public final class UpdateService: ObservableObject {
             return
         }
 
-        state = .downloading(update, 0.1)
+        state = .downloading(update, 0.15)
         let stagingDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("KeyVUpdate-\(UUID().uuidString)", isDirectory: true)
 
@@ -393,7 +394,7 @@ public final class UpdateService: ObservableObject {
                 try FileManager.default.removeItem(at: archivePath)
             }
             try FileManager.default.moveItem(at: tempFile, to: archivePath)
-            state = .downloading(update, 0.7)
+            state = .downloading(update, 0.72)
 
             let expectedDigest = try await resolveExpectedSHA256(for: update, asset: asset)
             if let expectedDigest {
@@ -552,6 +553,14 @@ private extension String {
 
 public struct UpdateWindowView: View {
     @ObservedObject var service: UpdateService
+    private let signing = SigningStatusInfo.inspectCurrentBundle()
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let fmt = ByteCountFormatter()
+        fmt.allowedUnits = [.useKB, .useMB]
+        fmt.countStyle = .file
+        return fmt
+    }()
 
     @MainActor
     public init(service: UpdateService? = nil) {
@@ -559,7 +568,7 @@ public struct UpdateWindowView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
                 if let icon = KeyVIcon.swiftImage(size: 48) {
                     icon.resizable().frame(width: 48, height: 48)
@@ -570,42 +579,121 @@ public struct UpdateWindowView: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Cập nhật KeyV").font(.title3.bold())
-                    Text("Phiên bản hiện tại: v\(service.currentVersionString)")
+                    Text("Cập nhật phần mềm KeyV")
+                        .font(.title3.bold())
+                    Text("Phiên bản đang chạy: v\(service.currentVersionString)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                statusBadge
             }
 
             Divider()
 
-            switch service.state {
-            case .idle:
-                Text("Nhấn Kiểm tra ngay để tìm phiên bản mới từ GitHub Releases.")
+            contentBody
+
+            signingNoticeCard
+        }
+        .padding(22)
+        .frame(width: 520, height: 390)
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch service.state {
+        case .checking:
+            pill(text: "Đang kiểm tra", symbol: "hourglass", color: .secondary)
+        case .upToDate:
+            pill(text: "Mới nhất", symbol: "checkmark.circle.fill", color: .green)
+        case .updateAvailable(let update):
+            pill(text: "v\(update.version.description)", symbol: "sparkles", color: .accentColor)
+        case .downloading(_, let progress):
+            pill(text: "\(Int(progress * 100))%", symbol: "arrow.down.circle.fill", color: .accentColor)
+        case .installing:
+            pill(text: "Đang cài đặt", symbol: "gearshape.2.fill", color: .accentColor)
+        case .failed:
+            pill(text: "Tạm gián đoạn", symbol: "exclamationmark.triangle.fill", color: .orange)
+        case .idle:
+            EmptyView()
+        }
+    }
+
+    private func pill(text: String, symbol: String, color: Color) -> some View {
+        Label(text, systemImage: symbol)
+            .font(.system(size: 11.5, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(color)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.14), in: Capsule())
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private var contentBody: some View {
+        switch service.state {
+        case .idle:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Kiểm tra bản phát hành chính thức mới nhất từ GitHub Releases với xác thực SHA-256 và chữ ký mã nguồn.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 HStack {
+                    Button("Mở GitHub Releases") {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/nhuuduc/keyv/releases")!)
+                    }
                     Spacer()
                     Button("Kiểm tra ngay") {
                         Task { await service.checkForUpdates(userInitiated: true) }
                     }
                     .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
                 }
+            }
 
-            case .checking:
+        case .checking:
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Đang kiểm tra phiên bản mới trên GitHub…")
+                    ProgressView().controlSize(.regular)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Đang kết nối GitHub Releases…")
+                            .font(.headline)
+                        Text("Đang đối chiếu phiên bản hiện tại (v\(service.currentVersionString)).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
+            }
 
-            case .upToDate(let ver):
-                Label("Bạn đang sử dụng phiên bản mới nhất (v\(ver)).", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+        case .upToDate(let ver):
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("KeyV đang ở phiên bản mới nhất (v\(ver))")
+                            .font(.headline)
+                        Text("Không cần cập nhật thêm vào lúc này.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+
                 Spacer()
+
                 HStack {
-                    Button("Mở trang GitHub Releases") {
+                    Button("Xem lịch sử phát hành") {
                         NSWorkspace.shared.open(URL(string: "https://github.com/nhuuduc/keyv/releases")!)
                     }
                     Spacer()
@@ -613,32 +701,48 @@ public struct UpdateWindowView: View {
                         Task { await service.checkForUpdates(userInitiated: true) }
                     }
                 }
+            }
 
-            case .updateAvailable(let update):
-                Label("Đã có bản cập nhật mới: \(update.title) (v\(update.version.description))", systemImage: "sparkles")
-                    .font(.headline)
-                if !update.notes.isEmpty {
-                    ScrollView {
-                        Text(update.notes)
-                            .font(.callout)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .padding(10)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Spacer()
-                }
+        case .updateAvailable(let update):
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Button("Xem trên GitHub") {
+                    Label("\(update.title) (v\(update.version.description))", systemImage: "sparkles")
+                        .font(.headline)
+                    Spacer()
+                    if let asset = update.archiveAsset {
+                        Text(Self.sizeFormatter.string(fromByteCount: Int64(asset.size)))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ScrollView {
+                    Text(update.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                         ? "Bản phát hành cải thiện hiệu năng, độ ổn định và trải nghiệm gõ tiếng Việt."
+                         : update.notes)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(10)
+                }
+                .frame(maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+
+                HStack {
+                    Button("Xem chi tiết trên GitHub") {
                         NSWorkspace.shared.open(update.htmlURL)
                     }
                     Spacer()
                     if update.archiveAsset != nil {
-                        Button("Cập nhật và khởi động lại") {
+                        Button("Cập nhật & khởi động lại") {
                             Task { await service.downloadAndInstall(update) }
                         }
                         .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                     } else {
                         Button("Tải thủ công…") {
                             NSWorkspace.shared.open(update.htmlURL)
@@ -646,29 +750,66 @@ public struct UpdateWindowView: View {
                         .buttonStyle(.borderedProminent)
                     }
                 }
+            }
 
-            case .downloading(let update, let progress):
-                Text("Đang tải bản cập nhật v\(update.version.description)…")
-                    .font(.headline)
+        case .downloading(let update, let progress):
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Đang tải gói cập nhật v\(update.version.description)…")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(Int(progress * 100))%")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
                 ProgressView(value: progress, total: 1.0)
+                    .progressViewStyle(.linear)
+                Text("Gói cập nhật sẽ được kiểm tra mã băm SHA-256 và chữ ký số trước khi thay thế ứng dụng.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
+            }
 
-            case .installing(let update):
+        case .installing(let update):
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Đang xác minh chữ ký và cài đặt v\(update.version.description)… KeyV sẽ tự khởi động lại.")
+                    ProgressView().controlSize(.regular)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Đang xác minh và cài đặt v\(update.version.description)…")
+                            .font(.headline)
+                        Text("KeyV sẽ tự động mở lại ngay sau khi hoàn tất thay thế gói ứng dụng.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
+            }
 
-            case .failed(let message):
-                Label("Không thể cập nhật tự động", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .font(.headline)
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Không thể hoàn tất cập nhật tự động")
+                            .font(.headline)
+                        Text(message)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color.orange.opacity(0.3), lineWidth: 1)
+                )
+
                 Spacer()
+
                 HStack {
                     Button("Mở GitHub Releases") {
                         NSWorkspace.shared.open(URL(string: "https://github.com/nhuuduc/keyv/releases")!)
@@ -681,7 +822,27 @@ public struct UpdateWindowView: View {
                 }
             }
         }
-        .padding(22)
-        .frame(width: 480, height: 320)
+    }
+
+    private var signingNoticeCard: some View {
+        HStack(spacing: 8) {
+            Image(systemName: signing.preservesTCC ? "checkmark.shield.fill" : "info.circle.fill")
+                .foregroundStyle(signing.preservesTCC ? .green : .secondary)
+                .font(.system(size: 13))
+            Text(signing.preservesTCC
+                 ? "Chữ ký ổn định (\(signing.summary)): quyền Trợ năng được giữ nguyên sau khi cập nhật."
+                 : "Chữ ký cục bộ (\(signing.summary)): có thể cần bật lại quyền Trợ năng sau khi thay bản mới.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.75), lineWidth: 1)
+        )
     }
 }

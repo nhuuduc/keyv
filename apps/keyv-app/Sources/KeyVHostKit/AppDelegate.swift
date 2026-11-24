@@ -4,6 +4,50 @@ import ApplicationServices
 import KeyVCore
 import Carbon.HIToolbox
 
+@MainActor
+public final class WindowFocusCoordinator: NSObject {
+    public static let shared = WindowFocusCoordinator()
+
+    public var canRestoreAccessoryPolicy: () -> Bool = { true }
+    private let trackedWindows = NSHashTable<NSWindow>.weakObjects()
+    private var observedWindowIDs: Set<ObjectIdentifier> = []
+
+    public func present(_ window: NSWindow) {
+        registerIfNeeded(window)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    public func registerIfNeeded(_ window: NSWindow) {
+        trackedWindows.add(window)
+        let id = ObjectIdentifier(window)
+        guard !observedWindowIDs.contains(id) else { return }
+        observedWindowIDs.insert(id)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: window
+        )
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        let closing = notification.object as? NSWindow
+        reconcileActivationPolicy(excluding: closing)
+    }
+
+    public func reconcileActivationPolicy(excluding closingWindow: NSWindow? = nil) {
+        let hasVisibleWindow = trackedWindows.allObjects.contains { candidate in
+            candidate !== closingWindow && candidate.isVisible
+        }
+        if !hasVisibleWindow && canRestoreAccessoryPolicy() {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+}
+
 /// App entry: accessory (menu-bar-only) app bundling the engine, tap,
 /// CaptureService, overlay picker, settings window, global hotkey, updater.
 @MainActor
@@ -16,6 +60,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private var typingMenuItem: NSMenuItem?
+    private var overlayMenuItem: NSMenuItem?
+    private var settingsMenuItem: NSMenuItem?
     private var updateMenuItem: NSMenuItem?
     private var mainUpdateMenuItem: NSMenuItem?
     private var settingsWindow: NSWindow?
@@ -29,6 +75,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                                          eventKind: UInt32(kEventHotKeyPressed))
 
     public func applicationWillFinishLaunching(_ notification: Notification) {
+        WindowFocusCoordinator.shared.canRestoreAccessoryPolicy = { [weak self] in
+            self?.tap != nil
+        }
         NSApp.setActivationPolicy(.accessory)
     }
 
@@ -114,29 +163,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tap = candidate
         PermissionModel.shared.status = .ready
+        let closingOnboarding = onboardingWindow
         onboardingWindow?.close()
         onboardingWindow = nil
-        NSApp.setActivationPolicy(.accessory)
+        WindowFocusCoordinator.shared.reconcileActivationPolicy(excluding: closingOnboarding)
         NSLog("[KeyV] typing pipeline installed")
     }
 
     private func showOnboarding() {
-        NSApp.setActivationPolicy(.regular)
-
         if onboardingWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
+                contentRect: NSRect(x: 0, y: 0, width: 540, height: 560),
                 styleMask: [.titled, .closable],
                 backing: .buffered, defer: false)
-            window.title = "KeyV"
+            window.title = "Thiết lập KeyV"
             window.contentView = NSHostingView(rootView: OnboardingView(checkAgain: { [weak self] in self?.pollAccessibility() }))
             window.center()
             window.isReleasedWhenClosed = false
             onboardingWindow = window
         }
-        onboardingWindow?.makeKeyAndOrderFront(nil)
-        onboardingWindow?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        if let onboardingWindow {
+            WindowFocusCoordinator.shared.present(onboardingWindow)
+        }
     }
 
     @objc private func pollAccessibility() {
@@ -161,16 +209,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        let button = statusItem.button
-        button?.font = .systemFont(ofSize: 14, weight: .bold)
-        button?.title = menuBarLetter()
-
         let menu = NSMenu()
         menu.delegate = self
 
         let typingItem = NSMenuItem(
             title: typingStatusTitle(),
-            action: #selector(toggleTyping), keyEquivalent: "")
+            action: #selector(toggleTyping),
+            keyEquivalent: ""
+        )
         typingItem.target = self
         typingMenuItem = typingItem
         menu.addItem(typingItem)
@@ -178,10 +224,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let overlay = NSMenuItem(title: "Lịch sử clipboard…", action: #selector(showOverlay), keyEquivalent: "")
         overlay.target = self
+        overlay.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Lịch sử clipboard")
+        overlayMenuItem = overlay
         menu.addItem(overlay)
 
         let settings = NSMenuItem(title: "Cài đặt…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.keyEquivalentModifierMask = [.command]
         settings.target = self
+        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Cài đặt")
+        settingsMenuItem = settings
         menu.addItem(settings)
 
         let checkUpdates = NSMenuItem(title: updateMenuTitle(), action: #selector(checkForUpdates), keyEquivalent: "")
@@ -191,7 +242,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Thoát KeyV", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.keyEquivalentModifierMask = [.command]
         quitItem.target = self
+        quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Thoát KeyV")
         menu.addItem(quitItem)
 
         statusItem.menu = menu
@@ -200,7 +253,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "KeyV")
         let preferences = NSMenuItem(title: "Cài đặt…", action: #selector(showSettings), keyEquivalent: ",")
+        preferences.keyEquivalentModifierMask = [.command]
         preferences.target = self
+        preferences.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         appMenu.addItem(preferences)
         let mainCheckUpdates = NSMenuItem(title: updateMenuTitle(), action: #selector(checkForUpdates), keyEquivalent: "")
         mainCheckUpdates.target = self
@@ -208,11 +263,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(mainCheckUpdates)
         appMenu.addItem(.separator())
         let quit = NSMenuItem(title: "Thoát KeyV", action: #selector(quitApp), keyEquivalent: "q")
+        quit.keyEquivalentModifierMask = [.command]
         quit.target = self
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         appMenu.addItem(quit)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
         NSApp.mainMenu = mainMenu
+
+        refreshMenuBar()
     }
 
     private func updateMenuTitle() -> String {
@@ -222,10 +281,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         return "Kiểm tra cập nhật…"
     }
 
+    private func methodDisplayName(_ method: ViInputMethod) -> String {
+        switch method {
+        case .telex: return "Telex"
+        case .simpleTelex: return "Simple Telex"
+        case .vni: return "VNI"
+        case .off: return "English"
+        }
+    }
+
     private func typingStatusTitle() -> String {
         let current = AppSettings.shared.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
-        guard tap != nil else { return "Bộ gõ chưa sẵn sàng — mở lại KeyV để kiểm tra" }
-        return current.method == .off ? "Chế độ: English" : "Chế độ: Tiếng Việt"
+        guard tap != nil else { return "Chế độ: Chưa cấp quyền Trợ năng…" }
+        if current.method == .off {
+            return "Chế độ: English"
+        }
+        return "Chế độ: Tiếng Việt · \(methodDisplayName(current.method))"
     }
 
     private func menuBarLetter() -> String {
@@ -234,11 +305,179 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         return current.method == .off ? "E" : "V"
     }
 
+    private func makeStatusBarBadge(letter: String, isVietnamese: Bool, isWarning: Bool, hasUpdate: Bool) -> NSImage {
+        let width: CGFloat = hasUpdate ? 26 : 23
+        let height: CGFloat = 18
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            let pillRect = NSRect(x: 1.5, y: 2.0, width: 20.0, height: 14.0)
+            let pillPath = NSBezierPath(roundedRect: pillRect, xRadius: 4.2, yRadius: 4.2)
+            let useTemplateColors = !isWarning && !hasUpdate
+            let baseColor: NSColor = isWarning
+                ? .systemOrange
+                : (useTemplateColors ? .black : .labelColor)
+
+            let font = NSFont.systemFont(ofSize: 10.5, weight: .heavy)
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+
+            if isVietnamese && !isWarning {
+                baseColor.setFill()
+                pillPath.fill()
+                if let ctx = NSGraphicsContext.current?.cgContext {
+                    ctx.saveGState()
+                    ctx.setBlendMode(.clear)
+                    let attr = NSAttributedString(
+                        string: letter,
+                        attributes: [
+                            .font: font,
+                            .foregroundColor: NSColor.black,
+                            .paragraphStyle: style,
+                        ]
+                    )
+                    let textSize = attr.size()
+                    let textRect = NSRect(
+                        x: pillRect.midX - textSize.width / 2,
+                        y: pillRect.midY - textSize.height / 2,
+                        width: textSize.width,
+                        height: textSize.height
+                    )
+                    attr.draw(in: textRect)
+                    ctx.restoreGState()
+                }
+            } else {
+                if isWarning {
+                    baseColor.withAlphaComponent(0.16).setFill()
+                    pillPath.fill()
+                }
+                pillPath.lineWidth = 1.35
+                baseColor.withAlphaComponent(isWarning ? 0.95 : 0.85).setStroke()
+                pillPath.stroke()
+
+                let attr = NSAttributedString(
+                    string: letter,
+                    attributes: [
+                        .font: font,
+                        .foregroundColor: baseColor,
+                        .paragraphStyle: style,
+                    ]
+                )
+                let textSize = attr.size()
+                let textRect = NSRect(
+                    x: pillRect.midX - textSize.width / 2,
+                    y: pillRect.midY - textSize.height / 2,
+                    width: textSize.width,
+                    height: textSize.height
+                )
+                attr.draw(in: textRect)
+            }
+
+            if hasUpdate {
+                let dotCenter = NSPoint(x: width - 3.5, y: height - 4.0)
+                let dotRect = NSRect(x: dotCenter.x - 2.6, y: dotCenter.y - 2.6, width: 5.2, height: 5.2)
+                if let ctx = NSGraphicsContext.current?.cgContext {
+                    ctx.saveGState()
+                    ctx.setBlendMode(.clear)
+                    let halo = NSBezierPath(ovalIn: dotRect.insetBy(dx: -1.1, dy: -1.1))
+                    halo.fill()
+                    ctx.restoreGState()
+                }
+                NSColor.controlAccentColor.setFill()
+                NSBezierPath(ovalIn: dotRect).fill()
+            }
+            return true
+        }
+        image.isTemplate = !isWarning && !hasUpdate
+        return image
+    }
+
+    private func applyShortcutHint(to item: NSMenuItem?, keyCode: Int, carbonModifiers: UInt) {
+        guard let item else { return }
+        if let equiv = HotkeyRecorderView.menuKeyEquivalent(for: keyCode) {
+            item.keyEquivalent = equiv
+            item.keyEquivalentModifierMask = HotkeyRecorderView.appKitModifiers(of: carbonModifiers)
+        } else {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+        }
+    }
+
     private func refreshMenuBar() {
-        statusItem?.button?.title = menuBarLetter()
-        typingMenuItem?.title = typingStatusTitle()
-        updateMenuItem?.title = updateMenuTitle()
-        mainUpdateMenuItem?.title = updateMenuTitle()
+        let settings = AppSettings.shared
+        let current = settings.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let isWarning = (tap == nil)
+        let isVietnamese = !isWarning && current.method != .off
+        let hasUpdate = (UpdateService.shared.availableUpdate != nil)
+        let letter = menuBarLetter()
+
+        if let button = statusItem?.button {
+            button.title = ""
+            button.image = makeStatusBarBadge(
+                letter: letter,
+                isVietnamese: isVietnamese,
+                isWarning: isWarning,
+                hasUpdate: hasUpdate
+            )
+            button.imagePosition = .imageOnly
+            let toggleCompact = HotkeyRecorderView.compactDescribe(
+                keyCode: settings.toggleHotKeyCode,
+                carbonModifiers: settings.toggleHotKeyModifiers
+            )
+            if isWarning {
+                button.toolTip = "KeyV — Cần cấp quyền Trợ năng để kích hoạt bộ gõ"
+            } else {
+                let modeText = isVietnamese ? "Tiếng Việt (\(methodDisplayName(current.method)))" : "English"
+                let updateSuffix = hasUpdate ? " • Có bản cập nhật mới" : ""
+                button.toolTip = "KeyV — \(modeText) • Chuyển nhanh: \(toggleCompact)\(updateSuffix)"
+            }
+        }
+
+        let toggleCompact = HotkeyRecorderView.compactDescribe(
+            keyCode: settings.toggleHotKeyCode,
+            carbonModifiers: settings.toggleHotKeyModifiers
+        )
+        let overlayCompact = HotkeyRecorderView.compactDescribe(
+            keyCode: settings.overlayHotKeyCode,
+            carbonModifiers: settings.overlayHotKeyModifiers
+        )
+
+        if let typingMenuItem {
+            typingMenuItem.title = typingStatusTitle()
+            let symbol = isWarning
+                ? "exclamationmark.shield.fill"
+                : (isVietnamese ? "character.cursor.ibeam" : "globe")
+            typingMenuItem.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            applyShortcutHint(
+                to: typingMenuItem,
+                keyCode: settings.toggleHotKeyCode,
+                carbonModifiers: settings.toggleHotKeyModifiers
+            )
+            if #available(macOS 14.4, *) {
+                if isWarning {
+                    typingMenuItem.subtitle = "Nhấp để mở hướng dẫn cấp quyền Trợ năng"
+                } else {
+                    let ctrlShiftNote = settings.ctrlShiftSwitch ? " · hoặc Ctrl + Shift" : ""
+                    typingMenuItem.subtitle = "Nhấp để chuyển Việt / Anh (\(toggleCompact)\(ctrlShiftNote))"
+                }
+            }
+        }
+
+        if let overlayMenuItem {
+            applyShortcutHint(
+                to: overlayMenuItem,
+                keyCode: settings.overlayHotKeyCode,
+                carbonModifiers: settings.overlayHotKeyModifiers
+            )
+            if #available(macOS 14.4, *) {
+                overlayMenuItem.subtitle = "Mở nhanh bằng \(overlayCompact)"
+            }
+        }
+
+        let updateTitle = updateMenuTitle()
+        let updateSymbol = hasUpdate ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath"
+        updateMenuItem?.title = updateTitle
+        updateMenuItem?.image = NSImage(systemSymbolName: updateSymbol, accessibilityDescription: nil)
+        mainUpdateMenuItem?.title = updateTitle
+        mainUpdateMenuItem?.image = NSImage(systemSymbolName: updateSymbol, accessibilityDescription: nil)
     }
 
     @objc private func updateStateChanged() {
@@ -277,17 +516,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSettings() {
         if settingsWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 680, height: 640),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 720, height: 650),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             window.title = "Cài đặt KeyV"
+            window.minSize = NSSize(width: 700, height: 620)
             window.isReleasedWhenClosed = false
             window.center()
             window.contentView = NSHostingView(rootView: SettingsRootView())
             settingsWindow = window
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if let settingsWindow {
+            WindowFocusCoordinator.shared.present(settingsWindow)
+        }
     }
 
     @objc private func quitApp() {
