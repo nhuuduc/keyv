@@ -42,11 +42,14 @@ jobs:
           KEYV_UNIVERSAL: "1"
         run: ./scripts/build.sh
 
-      - name: Verify universal binary architectures & bundle signature
+      - name: Verify universal binary architectures, ad-hoc & persistent signing, and packaging
         run: |
           ARCHS="$(lipo -archs apps/keyv-app/KeyV.app/Contents/MacOS/KeyVApp)"
           echo "KeyVApp architectures: $ARCHS"
           echo "$ARCHS" | grep -q "arm64"
           echo "$ARCHS" | grep -q "x86_64"
+          codesign --verify --deep --strict --verbose=2 apps/keyv-app/KeyV.app
+          ./scripts/setup_signing_cert.sh
+          KEYV_UNIVERSAL=1 ./scripts/make_app.sh
           codesign --verify --deep --strict --verbose=2 apps/keyv-app/KeyV.app
           ./scripts/package_release.sh dist

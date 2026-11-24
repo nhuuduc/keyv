@@ -46,7 +46,7 @@ fi
 
 resolve_signing_identity() {
   if [ -n "${KEYV_SIGNING_IDENTITY:-}" ]; then
-    echo "$KEYV_SIGNING_IDENTITY"
+    printf '%s\n' "$KEYV_SIGNING_IDENTITY"
     return
   fi
 
@@ -54,9 +54,9 @@ resolve_signing_identity() {
   valid_identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
 
   local dev_id
-  dev_id="$(echo "$valid_identities" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)"
+  dev_id="$(printf '%s\n' "$valid_identities" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)"
   if [ -n "$dev_id" ]; then
-    echo "$dev_id"
+    printf '%s\n' "$dev_id"
     return
   fi
 
@@ -64,7 +64,7 @@ resolve_signing_identity() {
     local local_sha1
     local_sha1="$(security find-identity -p codesigning "$LOCAL_SIGNING_KEYCHAIN" 2>/dev/null | sed -n 's/^[[:space:]]*[0-9][0-9]*)[[:space:]]*\([0-9A-F]\{40\}\)[[:space:]]*"KeyV Code Signing.*/\1/p' | head -n 1)"
     if [ -n "$local_sha1" ]; then
-      echo "$local_sha1"
+      printf '%s\n' "$local_sha1"
       return
     fi
   fi
@@ -72,27 +72,27 @@ resolve_signing_identity() {
   local all_identities
   all_identities="$(security find-identity -p codesigning 2>/dev/null || true)"
   local any_keyv_sha1
-  any_keyv_sha1="$(echo "$all_identities" | sed -n 's/^[[:space:]]*[0-9][0-9]*)[[:space:]]*\([0-9A-F]\{40\}\)[[:space:]]*"KeyV Code Signing.*/\1/p' | head -n 1)"
+  any_keyv_sha1="$(printf '%s\n' "$all_identities" | sed -n 's/^[[:space:]]*[0-9][0-9]*)[[:space:]]*\([0-9A-F]\{40\}\)[[:space:]]*"KeyV Code Signing.*/\1/p' | head -n 1)"
   if [ -n "$any_keyv_sha1" ]; then
-    echo "$any_keyv_sha1"
+    printf '%s\n' "$any_keyv_sha1"
     return
   fi
 
   local apple_dev
-  apple_dev="$(echo "$valid_identities" | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1)"
+  apple_dev="$(printf '%s\n' "$valid_identities" | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1)"
   if [ -n "$apple_dev" ]; then
-    echo "$apple_dev"
+    printf '%s\n' "$apple_dev"
     return
   fi
 
-  echo "-"
+  printf '%s\n' "-"
 }
 
 SIGNING_IDENTITY="$(resolve_signing_identity)"
 CODESIGN_EXTRA_ARGS=()
 KEYCHAIN_ARGS=()
 
-if [ -n "${KEYV_KEYCHAIN_PATH:-}" ]; then
+if [ -n "${KEYV_KEYCHAIN_PATH:-}" ] && [ "$SIGNING_IDENTITY" != "-" ]; then
   KEYCHAIN_ARGS=(--keychain "$KEYV_KEYCHAIN_PATH")
 elif [[ "$SIGNING_IDENTITY" =~ ^[0-9A-F]{40}$ ]] && [ -f "$LOCAL_SIGNING_KEYCHAIN" ]; then
   KEYCHAIN_ARGS=(--keychain "$LOCAL_SIGNING_KEYCHAIN")
@@ -102,8 +102,8 @@ if [[ "$SIGNING_IDENTITY" == "Developer ID Application:"* ]]; then
   CODESIGN_EXTRA_ARGS=(--options runtime --timestamp)
 fi
 
-for nested in "$BUNDLE/Contents/Resources/"*.bundle; do
-  if [ -d "$nested" ]; then
+for nested in "$BUNDLE/Contents/Resources/"*.bundle(N); do
+  if [ -f "$nested/Contents/Info.plist" ] || [ -f "$nested/Info.plist" ]; then
     codesign --force --sign "$SIGNING_IDENTITY" "${KEYCHAIN_ARGS[@]}" "${CODESIGN_EXTRA_ARGS[@]}" "$nested"
   fi
 done
