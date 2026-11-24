@@ -5,7 +5,7 @@ import KeyVCore
 import Carbon.HIToolbox
 
 /// App entry: accessory (menu-bar-only) app bundling the engine, tap,
-/// CaptureService, overlay picker, settings window, global hotkey.
+/// CaptureService, overlay picker, settings window, global hotkey, updater.
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     static let overlayPanelIdentifier = "KeyVOverlayPanel"
@@ -16,11 +16,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private var typingMenuItem: NSMenuItem?
+    private var updateMenuItem: NSMenuItem?
+    private var mainUpdateMenuItem: NSMenuItem?
     private var settingsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
     private var accessibilityPoller: Timer?
     private let overlayPanel = OverlayPickerPanel()
-    private var hotKeyRef: EventHotKeyRef?
+    private var overlayHotKeyRef: EventHotKeyRef?
+    private var toggleHotKeyRef: EventHotKeyRef?
     private var hotKeyEventHandler: EventHandlerRef?
     private var hotKeyInstalledEventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                                          eventKind: UInt32(kEventHotKeyPressed))
@@ -31,32 +34,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = AppSettings.shared
-        let effective = settings.effectiveFor(bundleID: nil)
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let effective = settings.effectiveFor(bundleID: frontBundle)
         engine = ViEngine(method: effective.method,
                           orthography: effective.orthography,
                           macroEnabled: settings.macroEnabled,
                           allowWAsConsonant: settings.allowWAsConsonant)
         engine.setOptions(autoCapitalize: settings.autoCapitalize,
-                          repeatedRestore: settings.repeatedRestore)
+                          repeatedRestore: settings.repeatedRestore,
+                          spellCheck: settings.spellCheck)
 
         capture = ClipboardCaptureService()
         capture.start()
 
         setupStatusItem()
-        installGlobalHotKey()
+        installGlobalHotKeys()
 
         settings.onChange(target: self, selector: #selector(engineSettingsChanged(_:)))
         NotificationCenter.default.addObserver(
             self, selector: #selector(macroFileReloaded),
             name: Notification.Name("KeyVSavedMacroFile"), object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(updateStateChanged),
+            name: Notification.Name("KeyVUpdateStateChanged"), object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
 
-        // Load macros from the user-editable text file, if it exists.
         loadMacroFile()
+        UpdateService.shared.startAutomaticChecks()
 
-        // Keep checking quietly, including permission revocation after startup.
         let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pollAccessibility() }
         }
@@ -79,6 +86,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationWillTerminate(_ notification: Notification) {
         accessibilityPoller?.invalidate()
+        UpdateService.shared.stopAutomaticChecks()
         tap?.uninstall()
         capture?.stop()
     }
@@ -95,6 +103,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installTypingPipeline() {
         guard tap == nil else { return }
         let candidate = TapController(engine: engine, injector: EventInjector())
+        candidate.onModeToggleShortcut = { [weak self] in
+            Task { @MainActor in
+                self?.toggleTyping()
+            }
+        }
         guard candidate.install() else {
             PermissionModel.shared.status = .hookUnavailable
             return
@@ -103,15 +116,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         PermissionModel.shared.status = .ready
         onboardingWindow?.close()
         onboardingWindow = nil
-        // Back to a quiet menu-bar-only app once permission is granted.
         NSApp.setActivationPolicy(.accessory)
         NSLog("[KeyV] typing pipeline installed")
     }
 
     private func showOnboarding() {
-        // Promote to a regular app for the onboarding duration: Dock icon,
-        // focusable window — otherwise an accessory app's windows can end
-        // hidden behind the user's apps and the launch feels like a no-op.
         NSApp.setActivationPolicy(.regular)
 
         if onboardingWindow == nil {
@@ -126,7 +135,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             onboardingWindow = window
         }
         onboardingWindow?.makeKeyAndOrderFront(nil)
-        onboardingWindow?.orderFrontRegardless()   // even if this app isn't frontmost
+        onboardingWindow?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -152,7 +161,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        // "V" khi gõ tiếng Việt, "E" khi English — cập nhật realtime.
         let button = statusItem.button
         button?.font = .systemFont(ofSize: 14, weight: .bold)
         button?.title = menuBarLetter()
@@ -175,6 +183,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let settings = NSMenuItem(title: "Cài đặt…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+
+        let checkUpdates = NSMenuItem(title: updateMenuTitle(), action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdates.target = self
+        updateMenuItem = checkUpdates
+        menu.addItem(checkUpdates)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Thoát KeyV", action: #selector(quitApp), keyEquivalent: "q")
@@ -183,13 +196,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
 
-        // Standard shortcuts also work while the onboarding/settings window is active.
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "KeyV")
         let preferences = NSMenuItem(title: "Cài đặt…", action: #selector(showSettings), keyEquivalent: ",")
         preferences.target = self
         appMenu.addItem(preferences)
+        let mainCheckUpdates = NSMenuItem(title: updateMenuTitle(), action: #selector(checkForUpdates), keyEquivalent: "")
+        mainCheckUpdates.target = self
+        mainUpdateMenuItem = mainCheckUpdates
+        appMenu.addItem(mainCheckUpdates)
         appMenu.addItem(.separator())
         let quit = NSMenuItem(title: "Thoát KeyV", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
@@ -197,6 +213,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    private func updateMenuTitle() -> String {
+        if let avail = UpdateService.shared.availableUpdate {
+            return "Có bản cập nhật mới (v\(avail.version.description))…"
+        }
+        return "Kiểm tra cập nhật…"
     }
 
     private func typingStatusTitle() -> String {
@@ -214,12 +237,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenuBar() {
         statusItem?.button?.title = menuBarLetter()
         typingMenuItem?.title = typingStatusTitle()
+        updateMenuItem?.title = updateMenuTitle()
+        mainUpdateMenuItem?.title = updateMenuTitle()
     }
 
-    @objc private func toggleTyping() {
+    @objc private func updateStateChanged() {
+        refreshMenuBar()
+    }
+
+    @objc fileprivate func toggleTyping() {
         guard tap != nil else { showOnboarding(); return }
         let settings = AppSettings.shared
-        if settings.method == .off {
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if let frontBundle, var override = settings.appOverridesJSON[frontBundle], override.useMode != nil {
+            let nextMode: ViInputMethod = override.useMode == .off ? settings.lastVietnameseMethod : .off
+            override.useModeRaw = nextMode.rawValue
+            var all = settings.appOverridesJSON
+            all[frontBundle] = override
+            settings.appOverridesJSON = all
+        } else if settings.method == .off {
             settings.method = settings.lastVietnameseMethod
         } else {
             settings.lastVietnameseMethod = settings.method
@@ -234,10 +270,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayPanel.toggleNearFrontmost()
     }
 
+    @objc private func checkForUpdates() {
+        UpdateService.shared.showUpdateWindowAndCheck()
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
+                contentRect: NSRect(x: 0, y: 0, width: 680, height: 640),
                 styleMask: [.titled, .closable],
                 backing: .buffered, defer: false)
             window.title = "Cài đặt KeyV"
@@ -258,30 +298,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func engineSettingsChanged(_ note: Notification) {
         let settings = AppSettings.shared
-        let effective = settings.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
-        // Recreate the engine so constructor-only options and removed macros apply too.
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let effective = settings.effectiveFor(bundleID: frontBundle)
         engine = ViEngine(method: effective.method, orthography: effective.orthography,
                           macroEnabled: settings.macroEnabled, allowWAsConsonant: settings.allowWAsConsonant)
-        engine.setOptions(autoCapitalize: settings.autoCapitalize, repeatedRestore: settings.repeatedRestore)
+        engine.setOptions(autoCapitalize: settings.autoCapitalize,
+                          repeatedRestore: settings.repeatedRestore,
+                          spellCheck: settings.spellCheck)
         loadMacroFile()
         tap?.engine = engine
         refreshMenuBar()
-
-        // Hotkey may have been re-recorded.
-        reRegisterGlobalHotKey()
+        reRegisterGlobalHotKeys()
     }
 
     @objc private func appActivated(_ note: Notification) {
         SelectionCacheService.shared.invalidate()
 
-        if let front = NSWorkspace.shared.frontmostApplication,
-           front.bundleIdentifier != Bundle.main.bundleIdentifier {
+        let front = NSWorkspace.shared.frontmostApplication
+        tap?.activeBundleID = front?.bundleIdentifier
+        tap?.activePID = front?.processIdentifier ?? 0
+
+        if let front, front.bundleIdentifier != Bundle.main.bundleIdentifier {
             let name = front.localizedName ?? front.bundleIdentifier ?? "?"
             AppSettings.shared.noteSeenApp(bundleID: front.bundleIdentifier ?? "?", name: name)
         }
 
-        // Per-app profile: apply effective settings for the frontmost app.
-        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let bundleID = front?.bundleIdentifier
         let effective = AppSettings.shared.effectiveFor(bundleID: bundleID)
         engine.setMethod(effective.method)
         engine.setOrthography(effective.orthography)
@@ -305,11 +347,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Global overlay hotkey (Carbon)
+    // MARK: - Global hotkeys (Carbon)
 
-    private func installGlobalHotKey() {
-        let settings = AppSettings.shared
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4B655944 /* KeyV */), id: 1)
+    private func installGlobalHotKeys() {
         guard
             InstallEventHandler(
                 GetApplicationEventTarget(),
@@ -322,27 +362,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("[KeyV] InstallEventHandler failed for hotkey")
             return
         }
-        _ = RegisterEventHotKey(UInt32(settings.overlayHotKeyCode),
-                                UInt32(settings.overlayHotKeyModifiers),
-                                hotKeyID,
-                                GetApplicationEventTarget(),
-                                0,
-                                &hotKeyRef)
+        reRegisterGlobalHotKeys()
     }
 
-    private func reRegisterGlobalHotKey() {
-        if let ref = hotKeyRef {
+    private func reRegisterGlobalHotKeys() {
+        if let ref = overlayHotKeyRef {
             UnregisterEventHotKey(ref)
-            hotKeyRef = nil
+            overlayHotKeyRef = nil
+        }
+        if let ref = toggleHotKeyRef {
+            UnregisterEventHotKey(ref)
+            toggleHotKeyRef = nil
         }
         let settings = AppSettings.shared
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4B655944), id: 1)
+        let overlayID = EventHotKeyID(signature: OSType(0x4B655944), id: 1)
         _ = RegisterEventHotKey(UInt32(settings.overlayHotKeyCode),
                                 UInt32(settings.overlayHotKeyModifiers),
-                                hotKeyID,
+                                overlayID,
                                 GetApplicationEventTarget(),
                                 0,
-                                &hotKeyRef)
+                                &overlayHotKeyRef)
+
+        let toggleID = EventHotKeyID(signature: OSType(0x4B655944), id: 2)
+        _ = RegisterEventHotKey(UInt32(settings.toggleHotKeyCode),
+                                UInt32(settings.toggleHotKeyModifiers),
+                                toggleID,
+                                GetApplicationEventTarget(),
+                                0,
+                                &toggleHotKeyRef)
     }
 
     fileprivate func toggleOverlay() {
@@ -351,7 +398,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension AppDelegate: NSMenuDelegate {
-    /// Realtime menu refresh right before it opens.
     public func menuNeedsUpdate(_ menu: NSMenu) {
         refreshMenuBar()
     }
@@ -362,12 +408,16 @@ private func hotKeyEventReducer(_ call: EventHandlerCallRef?, _ event: EventRef?
     let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData!).takeUnretainedValue()
     var hotKeyPointerId = EventHotKeyID()
     guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
-                            nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyPointerId) == noErr,
-          hotKeyPointerId.id == 1 else {
+                            nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyPointerId) == noErr else {
         return noErr
     }
+    let id = hotKeyPointerId.id
     DispatchQueue.main.async {
-        appDelegate.toggleOverlay()
+        if id == 1 {
+            appDelegate.toggleOverlay()
+        } else if id == 2 {
+            appDelegate.toggleTyping()
+        }
     }
     return noErr
 }

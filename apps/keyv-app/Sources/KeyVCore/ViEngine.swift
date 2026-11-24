@@ -30,6 +30,7 @@ private enum KeyVABI {
     /// keyv.h option bits.
     static let optAutoCapitalize: Int32 = 1 << 0
     static let optRepeatedRestore: Int32 = 1 << 1
+    static let optSpellCheck: Int32 = 1 << 2
 }
 
 // MARK: - ViEngine (RAII wrapper over the Rust core)
@@ -77,6 +78,10 @@ public final class ViEngine {
         keyv_typer_reset(raw)
     }
 
+    public func processBackspace() {
+        keyv_process_backspace(raw)
+    }
+
     public func setMethod(_ method: ViInputMethod) {
         keyv_typer_set_method(raw, Int32(method.rawValue))
         reset()
@@ -87,11 +92,12 @@ public final class ViEngine {
         reset()
     }
 
-    /// Compose both option bits from stored state; called on settings change.
-    public func setOptions(autoCapitalize: Bool, repeatedRestore: Bool) {
+    /// Compose option bits from stored state; called on settings change.
+    public func setOptions(autoCapitalize: Bool, repeatedRestore: Bool, spellCheck: Bool = false) {
         var flags: Int32 = 0
         if autoCapitalize { flags |= KeyVABI.optAutoCapitalize }
         if repeatedRestore { flags |= KeyVABI.optRepeatedRestore }
+        if spellCheck { flags |= KeyVABI.optSpellCheck }
         keyv_typer_set_options(raw, flags)
     }
 

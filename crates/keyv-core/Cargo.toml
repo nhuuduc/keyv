@@ -1,6 +1,6 @@
 [package]
 name = "keyv-core"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "KeyV — Vietnamese input engine core: Telex/VNI finite-state machine. Clean-room implementation, no GPL-derived code."

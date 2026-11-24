@@ -2,6 +2,7 @@ import Foundation
 import KeyVCore
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 
 /// CGEventTap controller with auto re-arm on
@@ -16,18 +17,32 @@ final class TapController: NSObject {
 
     var engine: ViEngine
     private let injector: EventInjector
+    var activeBundleID: String?
+    var activePID: pid_t = 0
+    var onModeToggleShortcut: (() -> Void)?
+
+    private var ctrlShiftArmed = false
 
     init(engine: ViEngine, injector: EventInjector) {
         self.engine = engine
         self.injector = injector
+        if let front = NSWorkspace.shared.frontmostApplication {
+            self.activeBundleID = front.bundleIdentifier
+            self.activePID = front.processIdentifier
+        }
         super.init()
     }
 
     @discardableResult
     func install() -> Bool {
         if tap != nil { return true }
-        let mask = [CGEventType.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
-            .reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
+        let mask = [
+            CGEventType.keyDown,
+            .flagsChanged,
+            .leftMouseDown,
+            .rightMouseDown,
+            .otherMouseDown,
+        ].reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
 
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
@@ -57,6 +72,7 @@ final class TapController: NSObject {
     }
 
     func uninstall() {
+        ctrlShiftArmed = false
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -81,19 +97,41 @@ final class TapController: NSObject {
         }
 
         // Synthetic events must reach the target app without re-entering the engine.
+        if event.getIntegerValueField(.eventSourceUserData) == EventInjector.syntheticMarker {
+            return Unmanaged.passUnretained(event)
+        }
         let sourceID = CGEventSourceStateID(
             rawValue: Int32(truncatingIfNeeded: event.getIntegerValueField(.eventSourceStateID)))
         if sourceID == .privateState {
             return Unmanaged.passUnretained(event)
         }
+
+        if type == .flagsChanged {
+            handleFlagsChanged(event.flags)
+            return Unmanaged.passUnretained(event)
+        }
+
+        ctrlShiftArmed = false
+
         if type != .keyDown || !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
             engine.reset()
             SelectionCacheService.shared.invalidate()
             return Unmanaged.passUnretained(event)
         }
 
-        // Navigation kills word composition: reset the session.
+        if IsSecureEventInputEnabled() || SelectionCacheService.shared.isFocusedElementSecure(bundleID: activeBundleID) {
+            engine.reset()
+            return Unmanaged.passUnretained(event)
+        }
+
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        if keyCode == 51 {
+            engine.processBackspace()
+            SelectionCacheService.shared.invalidate()
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Navigation kills word composition: reset the session.
         if Self.navigationKeyCodes.contains(keyCode) {
             engine.reset()
             SelectionCacheService.shared.invalidate()
@@ -107,12 +145,11 @@ final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
-        guard let frontmost = NSWorkspace.shared.frontmostApplication,
-              frontmost.processIdentifier != 0
-        else {
+        let pid = activePID != 0 ? activePID : (NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+        guard pid != 0 else {
             return Unmanaged.passUnretained(event)
         }
-        let bundleID = frontmost.bundleIdentifier
+        let bundleID = activeBundleID
 
         // Prefetch selection state for the NEXT replace (async + throttled).
         SelectionCacheService.shared.scheduleRefresh(bundleID: bundleID)
@@ -123,16 +160,40 @@ final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         case .replace(let backspaces, let chars):
             injector.realize(.replace(backspaces: backspaces, chars: chars),
-                             pid: frontmost.processIdentifier,
+                             pid: pid,
                              bundleID: bundleID)
             return nil
         }
     }
 
+    private func handleFlagsChanged(_ flags: CGEventFlags) {
+        let relevant = flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
+        if relevant == [.maskControl, .maskShift] {
+            if AppSettings.shared.ctrlShiftSwitch {
+                ctrlShiftArmed = true
+            }
+            return
+        }
+        if ctrlShiftArmed && relevant.isEmpty {
+            ctrlShiftArmed = false
+            if AppSettings.shared.ctrlShiftSwitch {
+                engine.reset()
+                SelectionCacheService.shared.invalidate()
+                onModeToggleShortcut?()
+            }
+            return
+        }
+        if !relevant.intersection([.maskCommand, .maskAlternate]).isEmpty {
+            ctrlShiftArmed = false
+            engine.reset()
+            SelectionCacheService.shared.invalidate()
+        }
+    }
+
     private static let navigationKeyCodes: Set<Int> = [
-        123, 124, 125, 126,   // arrows
-        115, 119,             // home / end
-        117, 51, 53, 48, 36, 76, // delete, escape, tab, return, keypad enter
+        123, 124, 125, 126,       // arrows
+        115, 119, 116, 121,       // home / end / page up / page down
+        117, 53, 48, 36, 76,      // forward delete, escape, tab, return, keypad enter
     ]
 }
 

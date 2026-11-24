@@ -6,7 +6,7 @@ import Carbon.HIToolbox
 import KeyVCore
 
 /// Settings window: OpenKey-style control panel.
-/// Top = live controls (Điều khiển); below = tabs (Bộ gõ / Gõ tắt /
+/// Top = live controls (Điều khiển); below = tabs (Bộ gõ / Ứng dụng / Gõ tắt /
 /// Hệ thống / Thông tin).
 public struct SettingsRootView: View {
     @ObservedObject private var model = SettingsModel.shared
@@ -43,7 +43,7 @@ public struct SettingsRootView: View {
                     .tabItem { Text("Thông tin") }
             }
         }
-        .frame(width: 680, height: 620)
+        .frame(width: 680, height: 640)
     }
 }
 
@@ -65,9 +65,17 @@ private struct ControlPanelSection: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        Text("Có thể đổi trong menu V/E trên thanh menu macOS.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle("Đổi nhanh Việt / Anh bằng Ctrl + Shift", isOn: $model.ctrlShiftSwitch)
+                            .toggleStyle(.checkbox)
+                        HStack(spacing: 8) {
+                            Text("Phím chuyển:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HotkeyRecorder(keyCode: $model.toggleHotKeyCode,
+                                           modifiers: $model.toggleHotKeyModifierMask)
+                                .frame(width: 170, height: 28)
+                                .help("Bấm để đặt phím tắt chuyển Việt / Anh.")
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -78,9 +86,9 @@ private struct ControlPanelSection: View {
                             Text("VNI").tag(ViInputMethod.vni)
                             Text("Tắt (English)").tag(ViInputMethod.off)
                         }
-                        Toggle("Bíp khi đổi Việt / Anh từ menu", isOn: $model.beepOnModeSwitch)
+                        Toggle("Bíp khi đổi Việt / Anh", isOn: $model.beepOnModeSwitch)
                             .toggleStyle(.checkbox)
-                        Text("Bảng mã: Unicode")
+                        Text("Bảng mã: Unicode (dựng sẵn NFC)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -124,10 +132,9 @@ private struct SettingsEngineTab: View {
                 GridRow {
                     Toggle("Đặt dấu òa, úy (thay vì oà, uý)", isOn: $model.useStatefulOrthography)
                         .toggleStyle(.checkbox)
-                    Toggle("Kiểm tra chính tả", isOn: .constant(false))
+                    Toggle("Kiểm tra chính tả tiếng Việt", isOn: $model.spellCheck)
                         .toggleStyle(.checkbox)
-                        .disabled(true)
-                        .foregroundColor(.secondary)
+                        .help("Tránh bỏ dấu nhầm từ tiếng Anh và tự khôi phục từ sai cấu trúc tiếng Việt.")
                 }
                 GridRow {
                     Toggle("Sửa lỗi gợi ý (trình duyệt, Excel,…)", isOn: $model.compatFix)
@@ -140,17 +147,6 @@ private struct SettingsEngineTab: View {
                         .toggleStyle(.checkbox)
                     Toggle("Giữ w đầu từ làm phụ âm", isOn: $model.allowWAsConsonant)
                         .toggleStyle(.checkbox)
-                }
-                GridRow {
-                    Toggle("Chuyển chế độ thông minh", isOn: .constant(false))
-                        .toggleStyle(.checkbox)
-                        .disabled(true)
-                        .foregroundColor(.secondary)
-                        .help("Đang phát triển: tự nhận biết từ tiếng Anh.")
-                    Toggle("Tự ghi nhớ bảng mã theo ứng dụng", isOn: .constant(false))
-                        .toggleStyle(.checkbox)
-                        .disabled(true)
-                        .foregroundColor(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -298,6 +294,7 @@ private struct SettingsMacroTab: View {
 
 private struct SettingsSystemTab: View {
     @ObservedObject var model: SettingsModel
+    @ObservedObject private var updater = UpdateService.shared
 
     var body: some View {
         ScrollView {
@@ -306,6 +303,28 @@ private struct SettingsSystemTab: View {
                     Toggle("Khởi động cùng hệ thống", isOn: $model.launchAtStartup)
                         .toggleStyle(.checkbox)
                     Spacer()
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Cập nhật phần mềm").font(.headline)
+                    Toggle("Tự động kiểm tra bản cập nhật mới từ GitHub", isOn: $model.autoCheckUpdates)
+                        .toggleStyle(.checkbox)
+                    HStack(spacing: 12) {
+                        Button("Kiểm tra cập nhật…") {
+                            updater.showUpdateWindowAndCheck()
+                        }
+                        if let avail = updater.availableUpdate {
+                            Text("Có bản mới: v\(avail.version.description)")
+                                .font(.callout)
+                                .foregroundStyle(Color.accentColor)
+                        } else if case .upToDate(let ver) = updater.state {
+                            Text("Đang dùng bản mới nhất (v\(ver))")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Divider()
@@ -326,24 +345,48 @@ private struct SettingsSystemTab: View {
 // MARK: - Tab THÔNG TIN
 
 private struct SettingsAboutTab: View {
+    @ObservedObject private var updater = UpdateService.shared
+    private let signing = SigningStatusInfo.inspectCurrentBundle()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 KeyVIcon.swiftImage(size: 48)?
                     .resizable().frame(width: 48, height: 48)
                 ?? Image(systemName: "keyboard").resizable().frame(width: 48, height: 48)
-                VStack(alignment: .leading) {
-                    Text("KeyV 0.3").font(.title3).bold()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("KeyV v\(updater.currentVersionString)").font(.title3).bold()
                     Text("Bộ gõ tiếng Việt + Lịch sử clipboard cho macOS")
                         .foregroundColor(.secondary)
                 }
+                Spacer()
+                Button("Kiểm tra cập nhật…") {
+                    updater.showUpdateWindowAndCheck()
+                }
             }
 
-            Text("Engine clean-room Rust qua FFI nhúng, độ trễ gõ \u{2264}1 ms — MIT OR Apache-2.0")
+            Text("Engine clean-room Rust nhúng qua C ABI — giấy phép MIT OR Apache-2.0")
                 .foregroundColor(.secondary)
-            Text("Không dùng mã từ OpenKey / Unikey / EVKey")
+            Text("Không sử dụng mã nguồn GPL từ bất kỳ bộ gõ bên thứ ba nào.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Label(
+                    signing.preservesTCC
+                        ? "Chữ ký số ổn định (\(signing.summary)) — giữ quyền Trợ năng khi cập nhật"
+                        : "Chữ ký cục bộ (\(signing.summary)) — chạy scripts/setup_signing_cert.sh để giữ quyền Trợ năng",
+                    systemImage: signing.preservesTCC ? "checkmark.seal.fill" : "info.circle"
+                )
+                .font(.footnote)
+                .foregroundStyle(signing.preservesTCC ? .green : .secondary)
+
+                Link("Mã nguồn & bản phát hành: github.com/nhuuduc/keyv",
+                     destination: URL(string: "https://github.com/nhuuduc/keyv")!)
+                    .font(.footnote)
+            }
 
             Spacer()
         }
@@ -366,7 +409,13 @@ public final class SettingsModel: NSObject, ObservableObject {
     @Published public var overlayHotKeyCode: Int { didSet { guard !syncing else { return }; AppSettings.shared.overlayHotKeyCode = overlayHotKeyCode } }
     @Published public var overlayHotKeyModifierMask: UInt { didSet { guard !syncing else { return }; AppSettings.shared.overlayHotKeyModifiers = overlayHotKeyModifierMask } }
 
+    @Published public var toggleHotKeyCode: Int { didSet { guard !syncing else { return }; AppSettings.shared.toggleHotKeyCode = toggleHotKeyCode } }
+    @Published public var toggleHotKeyModifierMask: UInt { didSet { guard !syncing else { return }; AppSettings.shared.toggleHotKeyModifiers = toggleHotKeyModifierMask } }
+    @Published public var ctrlShiftSwitch: Bool { didSet { guard !syncing else { return }; AppSettings.shared.ctrlShiftSwitch = ctrlShiftSwitch } }
+    @Published public var autoCheckUpdates: Bool { didSet { guard !syncing else { return }; AppSettings.shared.autoCheckUpdates = autoCheckUpdates } }
+
     @Published public var repeatedRestore: Bool { didSet { guard !syncing else { return }; AppSettings.shared.repeatedRestore = repeatedRestore } }
+    @Published public var spellCheck: Bool { didSet { guard !syncing else { return }; AppSettings.shared.spellCheck = spellCheck } }
     @Published public var autoCapitalize: Bool { didSet { guard !syncing else { return }; AppSettings.shared.autoCapitalize = autoCapitalize } }
     @Published public var beepOnModeSwitch: Bool { didSet { guard !syncing else { return }; AppSettings.shared.beepOnModeSwitch = beepOnModeSwitch } }
     @Published public var compatFix: Bool { didSet { guard !syncing else { return }; AppSettings.shared.compatFix = compatFix } }
@@ -414,7 +463,12 @@ public final class SettingsModel: NSObject, ObservableObject {
         retentionLimit = s.clipboardRetentionLimit
         overlayHotKeyCode = s.overlayHotKeyCode
         overlayHotKeyModifierMask = s.overlayHotKeyModifiers
+        toggleHotKeyCode = s.toggleHotKeyCode
+        toggleHotKeyModifierMask = s.toggleHotKeyModifiers
+        ctrlShiftSwitch = s.ctrlShiftSwitch
+        autoCheckUpdates = s.autoCheckUpdates
         repeatedRestore = s.repeatedRestore
+        spellCheck = s.spellCheck
         autoCapitalize = s.autoCapitalize
         beepOnModeSwitch = s.beepOnModeSwitch
         compatFix = s.compatFix
@@ -440,11 +494,17 @@ public final class SettingsModel: NSObject, ObservableObject {
         orthography = s.orthography
         isEnglishMode = s.isEnglishMode
         useStatefulOrthography = s.orthography == .traditional
+        spellCheck = s.spellCheck
+        ctrlShiftSwitch = s.ctrlShiftSwitch
+        autoCheckUpdates = s.autoCheckUpdates
+        toggleHotKeyCode = s.toggleHotKeyCode
+        toggleHotKeyModifierMask = s.toggleHotKeyModifiers
+        overlayHotKeyCode = s.overlayHotKeyCode
+        overlayHotKeyModifierMask = s.overlayHotKeyModifiers
         rebuildRows()
     }
 
     func reloadMacros() {
-        // Delegate app pings us; the engine macro table rebuilds here.
         let settings = AppSettings.shared
         if settings.macroEnabled {
             NotificationCenter.default.post(name: Notification.Name("KeyVSavedMacroFile"), object: nil)
@@ -539,10 +599,6 @@ public final class SettingsModel: NSObject, ObservableObject {
         let dir = ClipboardStore.dataDir()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("macros.tsv")
-    }
-
-    private func updateLaunchAtStartup(_ on: Bool) {
-        SMAppServiceHelper.setEnabled(on)
     }
 }
 

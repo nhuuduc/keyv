@@ -3,8 +3,8 @@
 //! Ownership rules
 //! ===============
 //! - `KeyVTyper*` lives until `keyv_typer_free`.
-//! - `keyv_process_char` returns a heap-allocated `KeyVAction*` the caller
-//!   must release via `keyv_action_free`.
+//! - `keyv_process_char` returns NULL for `Pass` (zero allocation) or a
+//!   heap-allocated `KeyVAction*` the caller must release via `keyv_action_free`.
 //! - Strings returned by `keyv_action_chars` borrow the action and stay
 //!   valid until `keyv_action_free`.
 //!
@@ -33,6 +33,7 @@ pub const KEYV_ORTHO_MODERN: i32 = 1;
 /// Option bits for `keyv_typer_set_options`.
 pub const KEYV_OPT_AUTO_CAPITALIZE: i32 = 1 << 0;
 pub const KEYV_OPT_REPEATED_RESTORE: i32 = 1 << 1;
+pub const KEYV_OPT_SPELL_CHECK: i32 = 1 << 2;
 
 /// Opaque engine session (raw pointer across the ABI boundary).
 pub struct KeyVTyper {
@@ -51,11 +52,7 @@ pub struct KeyVAction {
 
 fn engine_action_to_raw_disown(action: EngineAction) -> *mut KeyVAction {
     match action {
-        EngineAction::Pass => Box::into_raw(Box::new(KeyVAction {
-            tag: KEYV_ACTION_PASS,
-            backspaces: 0,
-            utf8: ptr::null_mut(),
-        })),
+        EngineAction::Pass => ptr::null_mut(),
         EngineAction::Replace { n, chars } => {
             let utf8 = CString::new(chars).unwrap_or_default().into_raw();
             Box::into_raw(Box::new(KeyVAction {
@@ -98,6 +95,7 @@ pub extern "C" fn keyv_typer_new(
         allow_w_consonant: allow_w_consonant != 0,
         repeated_restore: true,
         auto_capitalize: false,
+        spell_check: false,
     };
     Box::into_raw(Box::new(KeyVTyper {
         typer: Typer::new(cfg, MacroTable::new()),
@@ -115,6 +113,13 @@ pub unsafe extern "C" fn keyv_typer_free(typer: *mut KeyVTyper) {
 pub unsafe extern "C" fn keyv_typer_reset(typer: *mut KeyVTyper) {
     if let Some(t) = unsafe { typer.as_mut() } {
         t.typer.reset();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn keyv_process_backspace(typer: *mut KeyVTyper) {
+    if let Some(t) = unsafe { typer.as_mut() } {
+        t.typer.backspace();
     }
 }
 
@@ -143,6 +148,7 @@ pub unsafe extern "C" fn keyv_typer_set_options(typer: *mut KeyVTyper, flags: i3
         let mut cfg = t.typer.config().clone();
         cfg.auto_capitalize = flags & KEYV_OPT_AUTO_CAPITALIZE != 0;
         cfg.repeated_restore = flags & KEYV_OPT_REPEATED_RESTORE != 0;
+        cfg.spell_check = flags & KEYV_OPT_SPELL_CHECK != 0;
         t.typer.set_options_no_reset(cfg);
     }
 }
@@ -173,19 +179,18 @@ pub unsafe extern "C" fn keyv_typer_set_macro(
     0
 }
 
-/// Process one character key (Unicode scalar). Returns a heap-allocated
-/// action owned by the caller; free with `keyv_action_free`.
+/// Process one character key (Unicode scalar). Returns NULL for `Pass`, or a
+/// heap-allocated `Replace` action owned by the caller (`keyv_action_free`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn keyv_process_char(
     typer: *mut KeyVTyper,
     codepoint: u32,
 ) -> *mut KeyVAction {
     let Some(t) = (unsafe { typer.as_mut() }) else {
-        return engine_pass_action_raw();
+        return ptr::null_mut();
     };
-    let ch = match char::from_u32(codepoint) {
-        Some(ch) => ch,
-        None => return engine_pass_action_raw(),
+    let Some(ch) = char::from_u32(codepoint) else {
+        return ptr::null_mut();
     };
     engine_action_to_raw_disown(t.typer.process_char(ch))
 }
@@ -224,9 +229,4 @@ pub unsafe extern "C" fn keyv_action_chars(action: *const KeyVAction) -> *const 
         Some(a) => a.utf8 as *const c_char,
         None => ptr::null(),
     }
-}
-
-#[inline]
-fn engine_pass_action_raw() -> *mut KeyVAction {
-    engine_action_to_raw_disown(EngineAction::Pass)
 }

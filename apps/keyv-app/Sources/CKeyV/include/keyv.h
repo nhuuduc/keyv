@@ -38,18 +38,20 @@ KeyVTyper *keyv_typer_new(int32_t method,
                           int32_t allow_w_consonant);
 void keyv_typer_free(KeyVTyper *typer);
 void keyv_typer_reset(KeyVTyper *typer);
+void keyv_process_backspace(KeyVTyper *typer);
 void keyv_typer_set_method(KeyVTyper *typer, int32_t method);
 void keyv_typer_set_orthography(KeyVTyper *typer, int32_t orthography);
 /* Option bits (Unikey/OpenKey-style toggles). */
 enum {
     KEYV_OPT_AUTO_CAPITALIZE = 1 << 0,  /* viết hoa chữ cái đầu câu */
     KEYV_OPT_REPEATED_RESTORE = 1 << 1, /* same tone key twice removes it */
+    KEYV_OPT_SPELL_CHECK = 1 << 2,      /* kiểm tra chính tả & khôi phục từ tiếng Anh */
 };
 void keyv_typer_set_options(KeyVTyper *typer, int32_t flags);
 /* Returns 0 on success, -1 on error (null args / invalid UTF-8). */
 int32_t keyv_typer_set_macro(KeyVTyper *typer, const char *key, const char *value);
 
-/* Per-keystroke: returns a heap-allocated action owned by the caller. */
+/* Per-keystroke: returns NULL for Pass, or a heap-allocated Replace action. */
 KeyVAction *keyv_process_char(KeyVTyper *typer, uint32_t codepoint);
 void keyv_action_free(KeyVAction *action);
 
