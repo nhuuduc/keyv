@@ -324,6 +324,10 @@ impl WordBuffer {
         if groups.len() != syl.nucleus.len() {
             return false;
         }
+        if initial == ['q', 'u'] && matches!(groups.as_slice(), [VG::E, VG::U] | [VG::Ehat, VG::U])
+        {
+            return false;
+        }
 
         let has_coda = !coda.is_empty();
         match groups.as_slice() {

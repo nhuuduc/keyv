@@ -41,14 +41,14 @@ final class EventInjector {
         "co.zeit.hyper",
     ]
 
-    func realize(_ action: ViEngineAction, pid: pid_t, bundleID: String?) {
+    func realize(_ action: ViEngineAction, pid: pid_t, bundleID: String?, proxy: CGEventTapProxy? = nil) {
         switch action {
         case .pass:
             break
         case .replace(let backspaces, let chars):
             guard backspaces > 0 else {
                 if !chars.isEmpty {
-                    postUnicode(chars)
+                    postUnicode(chars, proxy: proxy)
                 }
                 return
             }
@@ -67,23 +67,23 @@ final class EventInjector {
                         deleteCount += 1
                     }
                 } else {
-                    postUnicode("\u{200C}")
+                    postUnicode("\u{200C}", proxy: proxy)
                     deleteCount += 1
                 }
             } else if !isTerminal, let sel = selectionCache.cachedSelectionCount(bundleID: bundleID), sel > 0 {
                 deleteCount += 1
             }
 
-            postBackspaces(deleteCount)
+            postBackspaces(deleteCount, proxy: proxy)
             if !chars.isEmpty {
-                postUnicode(chars)
+                postUnicode(chars, proxy: proxy)
             }
         }
     }
 
     // MARK: - Event posting
 
-    private func postBackspaces(_ count: Int) {
+    private func postBackspaces(_ count: Int, proxy: CGEventTapProxy?) {
         guard count > 0 else { return }
         for _ in 0..<count {
             guard let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: backspaceKeyCode, keyDown: true),
@@ -91,12 +91,12 @@ final class EventInjector {
             else { continue }
             stamp(keyDown)
             stamp(keyUp)
-            keyDown.post(tap: .cgSessionEventTap)
-            keyUp.post(tap: .cgSessionEventTap)
+            post(keyDown, proxy: proxy)
+            post(keyUp, proxy: proxy)
         }
     }
 
-    private func postUnicode(_ string: String) {
+    private func postUnicode(_ string: String, proxy: CGEventTapProxy?) {
         guard !string.isEmpty else { return }
         var chunk: [UniChar] = []
         chunk.reserveCapacity(maxUnicodeChunkUTF16)
@@ -104,17 +104,17 @@ final class EventInjector {
         for ch in string {
             let units = Array(String(ch).utf16)
             if !chunk.isEmpty && chunk.count + units.count > maxUnicodeChunkUTF16 {
-                postUnicodeChunk(chunk)
+                postUnicodeChunk(chunk, proxy: proxy)
                 chunk.removeAll(keepingCapacity: true)
             }
             chunk.append(contentsOf: units)
         }
         if !chunk.isEmpty {
-            postUnicodeChunk(chunk)
+            postUnicodeChunk(chunk, proxy: proxy)
         }
     }
 
-    private func postUnicodeChunk(_ utf16Units: [UniChar]) {
+    private func postUnicodeChunk(_ utf16Units: [UniChar], proxy: CGEventTapProxy?) {
         guard !utf16Units.isEmpty,
               let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 0, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 0, keyDown: false)
@@ -123,8 +123,16 @@ final class EventInjector {
         stamp(keyUp)
         keyDown.keyboardSetUnicodeString(stringLength: CFIndex(utf16Units.count), unicodeString: utf16Units)
         keyUp.keyboardSetUnicodeString(stringLength: CFIndex(utf16Units.count), unicodeString: utf16Units)
-        keyDown.post(tap: .cgSessionEventTap)
-        keyUp.post(tap: .cgSessionEventTap)
+        post(keyDown, proxy: proxy)
+        post(keyUp, proxy: proxy)
+    }
+
+    private func post(_ event: CGEvent, proxy: CGEventTapProxy?) {
+        if let proxy {
+            event.tapPostEvent(proxy)
+        } else {
+            event.post(tap: .cgSessionEventTap)
+        }
     }
 
     private func stamp(_ event: CGEvent) {

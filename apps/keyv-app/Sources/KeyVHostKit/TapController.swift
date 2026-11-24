@@ -22,6 +22,8 @@ final class TapController: NSObject {
     var onModeToggleShortcut: (() -> Void)?
 
     private var ctrlShiftArmed = false
+    private var ctrlShiftDisqualified = false
+    private var workspaceObserverInstalled = false
 
     init(engine: ViEngine, injector: EventInjector) {
         self.engine = engine
@@ -31,6 +33,12 @@ final class TapController: NSObject {
             self.activePID = front.processIdentifier
         }
         super.init()
+    }
+
+    deinit {
+        if workspaceObserverInstalled {
+            NSWorkspace.shared.notificationCenter.removeObserver(self)
+        }
     }
 
     @discardableResult
@@ -44,10 +52,10 @@ final class TapController: NSObject {
             .otherMouseDown,
         ].reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
 
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
+        let callback: CGEventTapCallBack = { proxy, type, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
             let controller = Unmanaged<TapController>.fromOpaque(userInfo).takeUnretainedValue()
-            return controller.handleEvent(type: type, event: event)
+            return controller.handleEvent(proxy: proxy, type: type, event: event)
         }
 
         // AppDelegate owns this controller until the tap is invalidated.
@@ -68,11 +76,29 @@ final class TapController: NSObject {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        if !workspaceObserverInstalled {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(workspaceDidActivateApp(_:)),
+                name: NSWorkspace.didActivateApplicationNotification,
+                object: nil
+            )
+            workspaceObserverInstalled = true
+        }
         return true
     }
 
     func uninstall() {
         ctrlShiftArmed = false
+        ctrlShiftDisqualified = false
+        if workspaceObserverInstalled {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                self,
+                name: NSWorkspace.didActivateApplicationNotification,
+                object: nil
+            )
+            workspaceObserverInstalled = false
+        }
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -84,9 +110,20 @@ final class TapController: NSObject {
         tap = nil
     }
 
+    @objc private func workspaceDidActivateApp(_ note: Notification) {
+        ctrlShiftArmed = false
+        ctrlShiftDisqualified = false
+        let front = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+            ?? NSWorkspace.shared.frontmostApplication
+        activeBundleID = front?.bundleIdentifier
+        activePID = front?.processIdentifier ?? 0
+        engine.reset()
+        SelectionCacheService.shared.invalidate()
+    }
+
     // MARK: - Event handling
 
-    fileprivate func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    fileprivate func handleEvent(proxy: CGEventTapProxy?, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Gotcha 1: re-arm when the system kills the tap.
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
@@ -112,6 +149,9 @@ final class TapController: NSObject {
         }
 
         ctrlShiftArmed = false
+        if !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty {
+            ctrlShiftDisqualified = true
+        }
 
         if type != .keyDown || !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
             engine.reset()
@@ -121,6 +161,7 @@ final class TapController: NSObject {
 
         if IsSecureEventInputEnabled() || SelectionCacheService.shared.isFocusedElementSecure(bundleID: activeBundleID) {
             engine.reset()
+            SelectionCacheService.shared.scheduleRefresh(bundleID: activeBundleID)
             return Unmanaged.passUnretained(event)
         }
 
@@ -161,22 +202,19 @@ final class TapController: NSObject {
         case .replace(let backspaces, let chars):
             injector.realize(.replace(backspaces: backspaces, chars: chars),
                              pid: pid,
-                             bundleID: bundleID)
+                             bundleID: bundleID,
+                             proxy: proxy)
             return nil
         }
     }
 
     private func handleFlagsChanged(_ flags: CGEventFlags) {
         let relevant = flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
-        if relevant == [.maskControl, .maskShift] {
-            if AppSettings.shared.ctrlShiftSwitch {
-                ctrlShiftArmed = true
-            }
-            return
-        }
-        if ctrlShiftArmed && relevant.isEmpty {
+        if relevant.isEmpty {
+            let shouldToggle = ctrlShiftArmed && !ctrlShiftDisqualified
             ctrlShiftArmed = false
-            if AppSettings.shared.ctrlShiftSwitch {
+            ctrlShiftDisqualified = false
+            if shouldToggle && AppSettings.shared.ctrlShiftSwitch {
                 engine.reset()
                 SelectionCacheService.shared.invalidate()
                 onModeToggleShortcut?()
@@ -185,6 +223,18 @@ final class TapController: NSObject {
         }
         if !relevant.intersection([.maskCommand, .maskAlternate]).isEmpty {
             ctrlShiftArmed = false
+            ctrlShiftDisqualified = true
+            engine.reset()
+            SelectionCacheService.shared.invalidate()
+            return
+        }
+        if relevant == [.maskControl, .maskShift] {
+            if !ctrlShiftDisqualified && AppSettings.shared.ctrlShiftSwitch {
+                ctrlShiftArmed = true
+            }
+            return
+        }
+        if relevant.contains(.maskControl) {
             engine.reset()
             SelectionCacheService.shared.invalidate()
         }

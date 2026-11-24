@@ -104,6 +104,7 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         && buf.len() >= 2
         && buf.chars[0].base_lc() == 'd'
         && !buf.chars[0].stroke
+        && (!cfg.spell_check || buf.has_any_transform() || buf.len() >= 4)
         && !buf.analyze().nucleus.is_empty()
         && buf.is_valid_vietnamese()
     {
@@ -260,6 +261,19 @@ fn try_delayed_circumflex(
     }
 
     if !buf.is_valid_vietnamese() {
+        return None;
+    }
+
+    let lcs: Vec<char> = buf.chars.iter().map(ViChar::base_lc).collect();
+    let initial = &lcs[..syl.initial_end];
+    let coda = &lcs[syl.coda_start..];
+    if initial == ['p'] {
+        return None;
+    }
+    if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t']) && buf.last_tone_idx().is_none() {
+        return None;
+    }
+    if syl.nucleus.len() == 1 && coda.len() == 1 && !buf.has_any_transform() {
         return None;
     }
 
