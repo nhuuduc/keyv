@@ -328,12 +328,7 @@ impl WordBuffer {
         let has_coda = !coda.is_empty();
         match groups.as_slice() {
             [] => !has_coda,
-            [g] => {
-                if *g == VG::Abrev && matches!(coda, ['c', 'h'] | ['n', 'h']) {
-                    return false;
-                }
-                true
-            }
+            [g] => !(*g == VG::Abrev && matches!(coda, ['c', 'h'] | ['n', 'h'])),
             [a, b] => match (*a, *b) {
                 (VG::A, VG::I)
                 | (VG::A, VG::O)
