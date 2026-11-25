@@ -1111,7 +1111,10 @@ public final class SettingsModel: NSObject, ObservableObject {
     }
 
     public func refreshRunningRemoteServers() {
-        activeRemoteServers = RemoteInputDetector.shared.runningRemoteServers()
+        activeRemoteServers = RemoteInputDetector.shared.cachedRunningServers()
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] detected in
+            self?.activeRemoteServers = detected
+        }
     }
 
     @objc private func syncSettings() {

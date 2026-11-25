@@ -11,7 +11,8 @@ public final class SelectionCacheService {
         "com.runningwithcrayons.Alfred",
     ]
 
-    private static let cacheTTLNs: UInt64 = 250_000_000
+    private static let cacheTTLNs: UInt64 = 30_000_000_000
+    private static let axTimeoutSeconds: Float = 0.001
     private static let autocompleteRoles: Set<String> = [
         "AXTextField",
         "AXComboBox",
@@ -24,6 +25,7 @@ public final class SelectionCacheService {
         let resolvedPID: pid_t
         let resolvedBundleID: String?
         let needsAutocompleteSpacer: Bool?
+        let isSecureTextField: Bool
     }
 
     private var cached: CachedFocus?
@@ -50,13 +52,18 @@ public final class SelectionCacheService {
         return info.needsAutocompleteSpacer
     }
 
+    public func isFocusedElementSecureTextField(pid: pid_t, bundleID: String?) -> Bool {
+        let info = queryFocus(fallbackPID: pid, fallbackBundleID: bundleID)
+        return info.isSecureTextField
+    }
+
     public func hasActiveAutocompleteSelection(pid: pid_t, bundleID: String?) -> Bool {
         let info = queryFocus(fallbackPID: pid, fallbackBundleID: bundleID)
         guard info.needsAutocompleteSpacer == true, AXIsProcessTrusted() else {
             return false
         }
         let sysWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(sysWide, 0.002)
+        AXUIElementSetMessagingTimeout(sysWide, Self.axTimeoutSeconds)
         var focusedRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(
             sysWide,
@@ -67,7 +74,7 @@ public final class SelectionCacheService {
             return false
         }
         let element = focusedRef as! AXUIElement
-        AXUIElementSetMessagingTimeout(element, 0.002)
+        AXUIElementSetMessagingTimeout(element, Self.axTimeoutSeconds)
         guard let selected = Self.copyStringAttribute(element, kAXSelectedTextAttribute as CFString) else {
             return false
         }
@@ -88,14 +95,15 @@ public final class SelectionCacheService {
                 fallbackPID: fallbackPID,
                 resolvedPID: fallbackPID,
                 resolvedBundleID: fallbackBundleID,
-                needsAutocompleteSpacer: nil
+                needsAutocompleteSpacer: nil,
+                isSecureTextField: false
             )
             cached = entry
             return entry
         }
 
         let sysWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(sysWide, 0.002)
+        AXUIElementSetMessagingTimeout(sysWide, Self.axTimeoutSeconds)
 
         var focusedRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(
@@ -109,14 +117,17 @@ public final class SelectionCacheService {
                 fallbackPID: fallbackPID,
                 resolvedPID: fallbackPID,
                 resolvedBundleID: fallbackBundleID,
-                needsAutocompleteSpacer: nil
+                needsAutocompleteSpacer: nil,
+                isSecureTextField: false
             )
             cached = entry
             return entry
         }
 
         let element = focusedRef as! AXUIElement
-        AXUIElementSetMessagingTimeout(element, 0.002)
+        AXUIElementSetMessagingTimeout(element, Self.axTimeoutSeconds)
+        let subrole = Self.copyStringAttribute(element, kAXSubroleAttribute as CFString)
+        let isSecure = (subrole == (kAXSecureTextFieldSubrole as String))
 
         var elemPID: pid_t = 0
         AXUIElementGetPid(element, &elemPID)
@@ -146,7 +157,8 @@ public final class SelectionCacheService {
             fallbackPID: fallbackPID,
             resolvedPID: resolvedPID,
             resolvedBundleID: resolvedBundleID,
-            needsAutocompleteSpacer: needsSpacer
+            needsAutocompleteSpacer: needsSpacer,
+            isSecureTextField: isSecure
         )
         cached = entry
         return entry
@@ -160,9 +172,9 @@ public final class SelectionCacheService {
         }
 
         var cursor: AXUIElement? = element
-        for _ in 0..<8 {
+        for _ in 0..<5 {
             guard let current = cursor else { break }
-            AXUIElementSetMessagingTimeout(current, 0.002)
+            AXUIElementSetMessagingTimeout(current, axTimeoutSeconds)
             if let r = copyStringAttribute(current, kAXRoleAttribute as CFString), r == "AXWebArea" {
                 return false
             }

@@ -137,7 +137,8 @@ public final class EventInjector {
             ) {
                 isCompat = axDecision
             } else {
-                isCompat = Self.compatBundleIDs.contains(bundle)
+                isCompat = SelectionCacheService.spotlightLikeBundleIDs.contains(bundle)
+                    || bundle == "com.microsoft.Excel"
             }
 
             if isCompat {

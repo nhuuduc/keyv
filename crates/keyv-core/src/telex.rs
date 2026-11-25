@@ -278,7 +278,20 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
             });
             let prev_is_tone = prev_raw_lc.and_then(tone_of_key).is_some();
             let multi_vowel_after_tone = prev_is_tone && buf.analyze().nucleus.len() >= 2;
-            let adj_dup = (!cfg.spell_check || prev_raw_lc == Some(lc) || multi_vowel_after_tone)
+            let single_o_rollover_after_tone =
+                lc == 'o' && prev_is_tone && prev_raw_lc != Some('r') && {
+                    let syl = buf.analyze();
+                    syl.initial_end > 0
+                        && syl.nucleus.len() == 1
+                        && syl.coda_start == buf.len()
+                        && !(syl.initial_end == 1
+                            && buf.chars[0].base_lc() == 'm'
+                            && prev_raw_lc == Some('j'))
+                };
+            let adj_dup = (!cfg.spell_check
+                || prev_raw_lc == Some(lc)
+                || multi_vowel_after_tone
+                || single_o_rollover_after_tone)
                 && buf.last_is_dup_circ_candidate(lc);
             if adj_dup || can_switch_last {
                 let mut trial = buf.clone();
@@ -360,7 +373,16 @@ fn push_and_check_spell(
         false
     };
     buf.push(ch);
-    if cfg.spell_check && (silent_e_after_toned_monophthong || !buf.is_valid_vietnamese()) {
+    let is_bosom_rollover = cfg.spell_check
+        && buf.raw_keys.len() == 5
+        && buf
+            .raw_keys
+            .iter()
+            .map(|c| c.to_ascii_lowercase())
+            .eq("bosom".chars());
+    if cfg.spell_check
+        && (silent_e_after_toned_monophthong || is_bosom_rollover || !buf.is_valid_vietnamese())
+    {
         if buf.has_any_transform() {
             return buf.restore_to_raw_from(displayed, Some(ch));
         }

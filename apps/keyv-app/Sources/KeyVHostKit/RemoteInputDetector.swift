@@ -59,6 +59,9 @@ public final class RemoteInputDetector {
     private let selfPID: pid_t = ProcessInfo.processInfo.processIdentifier
     private var cache: [pid_t: CacheEntry] = [:]
     private var overrides: [pid_t: RemoteSourceKind] = [:]
+    private var cachedServers: [RemoteSourceKind] = []
+    private var lastServersScanNs: UInt64 = 0
+    private var serversScanInFlight = false
     public var metadataResolver: ((pid_t) -> ProcessInspectorMetadata)?
 
     public init(metadataResolver: ((pid_t) -> ProcessInspectorMetadata)? = nil) {
@@ -226,12 +229,10 @@ public final class RemoteInputDetector {
     }
 
     public static func systemMetadata(for pid: pid_t) -> ProcessInspectorMetadata {
-        let app = NSRunningApplication(processIdentifier: pid)
-        let bundleID = app?.bundleIdentifier
         let pidPath = kernelProcessPath(for: pid)
-        let procName = (bundleID == nil && pidPath == nil) ? kernelProcessName(for: pid) : nil
+        let procName = (pidPath == nil) ? kernelProcessName(for: pid) : nil
         return ProcessInspectorMetadata(
-            bundleID: bundleID,
+            bundleID: nil,
             executablePath: pidPath,
             processName: procName
         )
@@ -260,37 +261,86 @@ public final class RemoteInputDetector {
         }
     }
 
+    public func cachedRunningServers() -> [RemoteSourceKind] {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        if lastServersScanNs == 0 || (nowNs &- lastServersScanNs) > 30_000_000_000 {
+            refreshRunningServersAsync()
+        }
+        return cachedServers
+    }
+
+    public func refreshRunningServersAsync(completion: (([RemoteSourceKind]) -> Void)? = nil) {
+        if serversScanInFlight { return }
+        serversScanInFlight = true
+        let workspaceBundles: [(pid_t, String?)] = NSWorkspace.shared.runningApplications.map {
+            ($0.processIdentifier, $0.bundleIdentifier)
+        }
+        let ownPID = selfPID
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let detected = Self.scanRunningServers(workspaceBundles: workspaceBundles, selfPID: ownPID)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.cachedServers = detected
+                self.lastServersScanNs = DispatchTime.now().uptimeNanoseconds
+                self.serversScanInFlight = false
+                completion?(detected)
+            }
+        }
+    }
+
     public func runningRemoteServers() -> [RemoteSourceKind] {
+        let workspaceBundles: [(pid_t, String?)] = NSWorkspace.shared.runningApplications.map {
+            ($0.processIdentifier, $0.bundleIdentifier)
+        }
+        let detected = Self.scanRunningServers(workspaceBundles: workspaceBundles, selfPID: selfPID)
+        cachedServers = detected
+        lastServersScanNs = DispatchTime.now().uptimeNanoseconds
+        return detected
+    }
+
+    private static func scanRunningServers(
+        workspaceBundles: [(pid_t, String?)],
+        selfPID: pid_t
+    ) -> [RemoteSourceKind] {
         var found: Set<RemoteSourceKind> = []
-        for app in NSWorkspace.shared.runningApplications {
-            let pid = app.processIdentifier
+        for (pid, bundleID) in workspaceBundles {
             guard pid > 0 && pid != selfPID else { continue }
-            let path = Self.kernelProcessPath(for: pid)
-            let kind = Self.classify(bundleID: app.bundleIdentifier, executablePath: path)
-            if kind.isRemote {
-                found.insert(kind)
+            let byBundle = classify(bundleID: bundleID)
+            if byBundle.isRemote {
+                found.insert(byBundle)
+                continue
+            }
+            if bundleID == nil, let path = kernelProcessPath(for: pid) {
+                let byPath = classify(executablePath: path)
+                if byPath.isRemote {
+                    found.insert(byPath)
+                }
             }
         }
 
-        let estimatedCount = proc_listallpids(nil, 0)
-        if estimatedCount > 0 {
-            var pids = [pid_t](repeating: 0, count: Int(estimatedCount) + 32)
-            let byteCount = Int32(pids.count * MemoryLayout<pid_t>.stride)
-            let actualBytes = proc_listallpids(&pids, byteCount)
-            if actualBytes > 0 {
-                let count = min(pids.count, Int(actualBytes) / MemoryLayout<pid_t>.stride)
-                for idx in 0..<count {
-                    let pid = pids[idx]
-                    guard pid > 0 && pid != selfPID else { continue }
-                    if let path = Self.kernelProcessPath(for: pid) {
-                        let kind = Self.classify(executablePath: path)
-                        if kind.isRemote {
-                            found.insert(kind)
-                        }
-                    } else if let name = Self.kernelProcessName(for: pid) {
-                        let kind = Self.classify(processName: name)
-                        if kind.isRemote {
-                            found.insert(kind)
+        if found.isEmpty {
+            let estimatedCount = proc_listallpids(nil, 0)
+            if estimatedCount > 0 {
+                var pids = [pid_t](repeating: 0, count: Int(estimatedCount) + 32)
+                let byteCount = Int32(pids.count * MemoryLayout<pid_t>.stride)
+                let actualBytes = proc_listallpids(&pids, byteCount)
+                if actualBytes > 0 {
+                    let count = min(pids.count, Int(actualBytes) / MemoryLayout<pid_t>.stride)
+                    for idx in 0..<count {
+                        let pid = pids[idx]
+                        guard pid > 0 && pid != selfPID else { continue }
+                        if let name = kernelProcessName(for: pid) {
+                            let byName = classify(processName: name)
+                            if byName.isRemote {
+                                found.insert(byName)
+                                continue
+                            }
+                            if name == "service", let path = kernelProcessPath(for: pid) {
+                                let byPath = classify(executablePath: path)
+                                if byPath.isRemote {
+                                    found.insert(byPath)
+                                }
+                            }
                         }
                     }
                 }

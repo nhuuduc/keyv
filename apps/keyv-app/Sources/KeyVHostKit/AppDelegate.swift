@@ -91,6 +91,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.disableAutomaticTermination("KeyV EventTap")
         let settings = AppSettings.shared
         if Bundle.main.bundleIdentifier == "app.keyv.host" {
             settings.migrateLegacyDefaultsIfNeeded()
@@ -123,7 +124,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceAppsChanged(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceAppsChanged(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
         loadMacroFile()
         UpdateService.shared.startAutomaticChecks()
 
@@ -206,15 +216,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func pollAccessibility() {
         guard engine != nil else { return }
         guard Self.isAccessibilityGranted() else {
+            let hadTap = (tap != nil)
             tap?.uninstall()
             tap = nil
-            PermissionModel.shared.status = .permissionRequired
-            refreshMenuBar()
+            if PermissionModel.shared.status != .permissionRequired || hadTap {
+                PermissionModel.shared.status = .permissionRequired
+                refreshMenuBar()
+            }
             return
         }
-        installTypingPipeline()
-        tap?.refreshSecureInputState()
-        refreshMenuBar()
+        if tap == nil {
+            installTypingPipeline()
+            refreshMenuBar()
+        } else {
+            tap?.refreshSecureInputState()
+        }
+    }
+
+    @objc private func workspaceAppsChanged(_ note: Notification) {
+        RemoteInputDetector.shared.invalidateAll()
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
     }
 
     public func applicationDidBecomeActive(_ notification: Notification) {
@@ -519,7 +542,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let remoteMenuItem {
-            let runningServers = RemoteInputDetector.shared.runningRemoteServers()
+            let runningServers = RemoteInputDetector.shared.cachedRunningServers()
             let shouldShowRemote = !runningServers.isEmpty || settings.remoteDesktopMode != .smartAuto
             remoteMenuItem.isHidden = !shouldShowRemote
             if shouldShowRemote {
@@ -744,6 +767,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     public func menuNeedsUpdate(_ menu: NSMenu) {
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
         refreshMenuBar()
     }
 }

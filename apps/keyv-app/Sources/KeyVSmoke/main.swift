@@ -801,6 +801,20 @@ do {
             ts += 2_000_000
         }
         check(h.readScreen(), "task", "Mobile rapid Backspace burst (<15ms) resets engine and passes ASCII autocorrect untouched")
+
+        h.clearScreen()
+        for ch in "nhuw" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 15_000_000
+        }
+        _ = h.sendRemote("", 51, ts, []); ts += 2_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 2_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 5_000_000
+        for ch in "soos" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 5_000_000
+        }
+        check(h.readScreen(), "số", "Rapid Backspace burst followed immediately by 'soos' composes 'số' instead of literal 'soos'")
     }
 
     do {
@@ -1103,6 +1117,236 @@ do {
             "được tiếng việt hãy lên case đc",
             "Full iOS EN Telex sentence 'được tiếng việt hãy lên case đc' in SmartAuto"
         )
+    }
+
+    do {
+        func simulateTimedRollover(
+            _ input: String,
+            intervalNs: UInt64,
+            bundleID: String = "com.stablyai.orca"
+        ) -> (text: String, leakedKeyUps: Int) {
+            let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)
+            engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+            let injector = EventInjector(compatFixEnabled: true)
+            let tap = TapController(engine: engine, injector: injector, remoteDetector: detector)
+            tap.activeBundleID = bundleID
+            tap.activePID = 4242
+            tap.isSecureInputActive = false
+
+            var buffer = ""
+            injector.eventSink = { item in
+                switch item {
+                case .virtualKey(let kc, true, _, _):
+                    if kc == 51 && !buffer.isEmpty { buffer.removeLast() }
+                case .unicode(let units, true, _, _):
+                    buffer += String(decoding: units, as: UTF16.self)
+                default:
+                    break
+                }
+            }
+
+            var ts: UInt64 = 20_000_000_000
+            var pendingUps: [(Character, Bool)] = []
+            var leaked = 0
+
+            for (idx, ch) in input.enumerated() {
+                while let sameIdx = pendingUps.firstIndex(where: { $0.0.lowercased() == ch.lowercased() }) {
+                    let (upCh, consumed) = pendingUps.removeFirst()
+                    let up = makeHardwareKeyEvent(upCh, keyDown: false, timestamp: ts)
+                    let passedUp = tap.processEventForTesting(type: .keyUp, event: up)
+                    if consumed && passedUp != nil { leaked += 1 }
+                    if sameIdx == 0 { break }
+                }
+                ts += intervalNs
+                let flags: CGEventFlags = ch.isUppercase ? .maskShift : []
+                let down = makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts, flags: flags)
+                let passed = tap.processEventForTesting(type: .keyDown, event: down)
+                let wasConsumed = (passed == nil)
+                if let passed {
+                    buffer += passed.keyboardString()
+                }
+                pendingUps.append((ch, wasConsumed))
+
+                if pendingUps.count >= 2 || idx == input.count - 1 {
+                    while !pendingUps.isEmpty {
+                        let (upCh, consumed) = pendingUps.removeFirst()
+                        let up = makeHardwareKeyEvent(upCh, keyDown: false, timestamp: ts)
+                        let passedUp = tap.processEventForTesting(type: .keyUp, event: up)
+                        if consumed && passedUp != nil { leaked += 1 }
+                    }
+                }
+            }
+
+            return (buffer, leaked)
+        }
+
+        let sentences: [(String, String)] = [
+            (
+                "nhaapj nhanh cacs chuwx nhuw soos laij ra soos ",
+                "nhập nhanh các chữ như số lại ra số "
+            ),
+            (
+                "nhapja nhanh cacs chuwx nhuw soso laij ra soso ",
+                "nhập nhanh các chữ như số lại ra số "
+            ),
+            (
+                "soos boos coos toos phoos toots moots choots soots ddoots boons voons toons muoons cuoons ",
+                "số bố cố tố phố tốt mốt chốt sốt đốt bốn vốn tốn muốn cuốn "
+            ),
+            (
+                "soso boso coso toso phoso tosot mosot chosot sosot ddosot boson vonso ",
+                "số bố cố tố phố tốt mốt chốt sốt đốt bốn vốn "
+            ),
+            (
+                "dduowcj khoong banj owi hoom nay trowif ddepj quas ",
+                "được không bạn ơi hôm nay trời đẹp quá "
+            ),
+            (
+                "hayx kieemr tra kyx taats car cacs truowngf howpj gox nhanh ",
+                "hãy kiểm tra kỹ tất cả các trường hợp gõ nhanh "
+            ),
+        ]
+
+        for intervalMs in [UInt64(0), 3, 8, 15, 30] {
+            let intervalNs = intervalMs * 1_000_000
+            for (rawSentence, wantSentence) in sentences {
+                let res = simulateTimedRollover(rawSentence, intervalNs: intervalNs)
+                check(
+                    res.text,
+                    wantSentence,
+                    "Fast rollover (\(intervalMs)ms/key) for \"\(wantSentence.prefix(24))...\""
+                )
+                check(
+                    String(res.leakedKeyUps),
+                    "0",
+                    "Zero leaked keyUps at \(intervalMs)ms/key for \"\(wantSentence.prefix(18))...\""
+                )
+            }
+        }
+
+        do {
+            let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)
+            engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+            let injector = EventInjector(compatFixEnabled: true)
+            let tap = TapController(engine: engine, injector: injector, remoteDetector: detector)
+            tap.activeBundleID = "com.stablyai.orca"
+            tap.activePID = 4242
+            tap.isSecureInputActive = false
+
+            var field = ""
+            injector.eventSink = { item in
+                switch item {
+                case .virtualKey(let kc, true, _, _):
+                    if kc == 51 && !field.isEmpty { field.removeLast() }
+                case .unicode(let u, true, _, _):
+                    field += String(decoding: u, as: UTF16.self)
+                default:
+                    break
+                }
+            }
+
+            var ts: UInt64 = 30_000_000_000
+            let clickMouse = {
+                let mouseSrc = CGEventSource(stateID: .hidSystemState)
+                let click = CGEvent(
+                    mouseEventSource: mouseSrc,
+                    mouseType: .leftMouseDown,
+                    mouseCursorPosition: .zero,
+                    mouseButton: .left
+                )!
+                click.timestamp = ts
+                _ = tap.processEventForTesting(type: .leftMouseDown, event: click)
+                field = ""
+                ts += 5_000_000
+            }
+
+            for ch in "rustdesk" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            clickMouse()
+            for ch in "soos" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "số", "leftMouseDown after passthrough 'rustdesk' resets engine so 'soos' -> 'số'")
+
+            field = ""
+            for ch in "1duoc" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            clickMouse()
+            for ch in "soos" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "số", "leftMouseDown after '1duoc' resets engine so 'soos' -> 'số'")
+
+            field = ""
+            for ch in "case" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            clickMouse()
+            for ch in "dduowcj" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "được", "leftMouseDown after 'case' resets engine so 'dduowcj' -> 'được'")
+
+            var simulatedSecure = true
+            tap.secureInputProvider = { simulatedSecure }
+            tap.refreshSecureInputState()
+            check(tap.isSecureInputActive ? "true" : "false", "true", "Secure input latches true while AXSecureTextField active")
+            field = ""
+            for ch in "soos" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "soos", "Genuine AXSecureTextField passes raw password characters untouched")
+            field = ""
+            simulatedSecure = false
+            for ch in "soos" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "số", "TapController live-recovers from stale isSecureInputActive without app switch so 'soos' -> 'số'")
+            tap.secureInputProvider = nil
+            tap.refreshSecureInputState()
+            engine.reset()
+            field = ""
+            for ch in "soos" {
+                if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                    field += p.keyboardString()
+                }
+                ts += 5_000_000
+            }
+            check(field, "số", "Stuck global IsSecureEventInputEnabled without focused AXSecureTextField never breaks 'soos' -> 'số'")
+
+            let hStuckRemote = makeRemoteHarness(mode: .smartAuto, bundleID: "com.stablyai.orca")
+            for ch in "soos" {
+                _ = hStuckRemote.sendRemote(String(ch), keyCodeForASCII(ch), ts, [.maskSecondaryFn, .maskNumericPad])
+                ts += 5_000_000
+            }
+            check(hStuckRemote.readScreen(), "số", "Remote non-zero keyCode with stuck .maskSecondaryFn/.maskNumericPad still composes 'số'")
+        }
     }
 }
 

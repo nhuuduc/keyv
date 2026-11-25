@@ -23,6 +23,7 @@ public final class TapController: NSObject {
     public var ctrlShiftSwitchEnabled: Bool
     public var remoteDesktopMode: RemoteDesktopMode
     public var isSecureInputActive: Bool = false
+    public var secureInputProvider: (() -> Bool)?
     public private(set) var lastRemoteSource: RemoteSourceKind = .local
 
     private var ctrlShiftArmed = false
@@ -35,16 +36,11 @@ public final class TapController: NSObject {
     private var needsFrontmostRefresh = false
     private var lastEventWasRemote = false
     private var remoteMobileWordActive = false
-    private var remoteAutoReplaceUntilNs: UInt64 = 0
-    private var lastRemoteBackspaceNs: UInt64 = 0
-    private var remoteBackspaceBurstCount: Int = 0
     private var lastRemoteVkBackNs: UInt64 = 0
     private var pendingRustDeskSentinelOneNs: UInt64 = 0
     private var pendingRustDeskSentinelAfterBack = false
 
     private static let postReplaceSerializeWindowNs: UInt64 = 80_000_000
-    private static let remoteBackspaceBurstWindowNs: UInt64 = 15_000_000
-    private static let remoteAutoReplaceWindowNs: UInt64 = 25_000_000
     private static let rustDeskSentinelAfterBackWindowNs: UInt64 = 60_000_000
     private static let rustDeskSentinelFollowupWindowNs: UInt64 = 25_000_000
     private static let blockingModifiers: CGEventFlags = [
@@ -72,12 +68,12 @@ public final class TapController: NSObject {
         let settings = AppSettings.shared
         self.ctrlShiftSwitchEnabled = settings.ctrlShiftSwitch
         self.remoteDesktopMode = settings.remoteDesktopMode
-        self.isSecureInputActive = IsSecureEventInputEnabled()
         if let front = NSWorkspace.shared.frontmostApplication {
             self.activeBundleID = front.bundleIdentifier
             self.activePID = front.processIdentifier
         }
         super.init()
+        refreshSecureInputState()
     }
 
     @discardableResult
@@ -165,7 +161,18 @@ public final class TapController: NSObject {
     }
 
     public func refreshSecureInputState() {
-        isSecureInputActive = IsSecureEventInputEnabled()
+        if let secureInputProvider {
+            isSecureInputActive = secureInputProvider()
+            return
+        }
+        guard IsSecureEventInputEnabled() else {
+            isSecureInputActive = false
+            return
+        }
+        isSecureInputActive = SelectionCacheService.shared.isFocusedElementSecureTextField(
+            pid: activePID,
+            bundleID: activeBundleID
+        )
     }
 
     @discardableResult
@@ -180,6 +187,7 @@ public final class TapController: NSObject {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            NSLog("[KeyV] CGEventTap re-enabled after event \(type.rawValue)")
             engine.reset()
             clearConsumedKeys()
             resetRemoteInputState()
@@ -269,17 +277,6 @@ public final class TapController: NSObject {
             }
         }
 
-        var targetPID = activePID
-        var targetBundleID = activeBundleID
-        if proxy != nil {
-            let resolved = SelectionCacheService.shared.resolveFocusedOverlayApp(
-                currentPID: activePID,
-                currentBundleID: activeBundleID
-            )
-            targetPID = resolved.pid
-            targetBundleID = resolved.bundleID
-        }
-
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
         if !(isRemote && keyCode == 0) {
             _ = takeConsumedKey(keyCode)
@@ -287,7 +284,7 @@ public final class TapController: NSObject {
 
         let remoteZeroKeyString: String? = (isRemote && keyCode == 0) ? event.keyboardString() : nil
         let hasBlockingModifier: Bool
-        if isRemote && keyCode == 0 {
+        if isRemote {
             let isAppleFunctionScalar = remoteZeroKeyString?.unicodeScalars.first.map {
                 (0xF700...0xF8FF).contains($0.value)
             } ?? false
@@ -302,7 +299,6 @@ public final class TapController: NSObject {
             SelectionCacheService.shared.invalidate()
             engine.reset()
             remoteMobileWordActive = false
-            remoteAutoReplaceUntilNs = 0
             pendingRustDeskSentinelOneNs = 0
             pendingRustDeskSentinelAfterBack = false
             lastRemoteVkBackNs = 0
@@ -311,10 +307,13 @@ public final class TapController: NSObject {
         }
 
         if isSecureInputActive {
-            engine.reset()
-            resetRemoteInputState()
-            lastReplaceUptimeNs = 0
-            return Unmanaged.passUnretained(event)
+            refreshSecureInputState()
+            if isSecureInputActive {
+                engine.reset()
+                resetRemoteInputState()
+                lastReplaceUptimeNs = 0
+                return Unmanaged.passUnretained(event)
+            }
         }
 
         let eventTimeNs = event.timestamp != 0 ? event.timestamp : nowNs
@@ -343,37 +342,15 @@ public final class TapController: NSObject {
                     proxy: proxy
                 )
             }
-            if isRemote && remoteDesktopMode == .smartAuto {
-                if lastRemoteBackspaceNs != 0
-                    && eventTimeNs >= lastRemoteBackspaceNs
-                    && (eventTimeNs &- lastRemoteBackspaceNs) <= Self.remoteBackspaceBurstWindowNs {
-                    remoteBackspaceBurstCount += 1
-                } else {
-                    remoteBackspaceBurstCount = 1
-                }
-                lastRemoteBackspaceNs = eventTimeNs
-
-                if remoteMobileWordActive {
-                    engine.reset()
-                    return passOrSerialize(
-                        event,
-                        keyCode: keyCode,
-                        isRemote: true,
-                        withinPostReplaceWindow: withinPostReplaceWindow,
-                        proxy: proxy
-                    )
-                }
-                if remoteBackspaceBurstCount >= 2 {
-                    engine.reset()
-                    remoteAutoReplaceUntilNs = eventTimeNs &+ Self.remoteAutoReplaceWindowNs
-                    return passOrSerialize(
-                        event,
-                        keyCode: keyCode,
-                        isRemote: true,
-                        withinPostReplaceWindow: withinPostReplaceWindow,
-                        proxy: proxy
-                    )
-                }
+            if isRemote && remoteDesktopMode == .smartAuto && remoteMobileWordActive {
+                engine.reset()
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: true,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
             }
             engine.processBackspace()
             return passOrSerialize(
@@ -398,9 +375,6 @@ public final class TapController: NSObject {
             SelectionCacheService.shared.invalidate()
             engine.reset()
             remoteMobileWordActive = false
-            remoteAutoReplaceUntilNs = 0
-            lastRemoteBackspaceNs = 0
-            remoteBackspaceBurstCount = 0
             lastRemoteVkBackNs = 0
             pendingRustDeskSentinelOneNs = 0
             pendingRustDeskSentinelAfterBack = false
@@ -423,9 +397,6 @@ public final class TapController: NSObject {
         if let boundaryChar = delimiterBoundaryChar {
             SelectionCacheService.shared.invalidate()
             remoteMobileWordActive = false
-            remoteAutoReplaceUntilNs = 0
-            lastRemoteBackspaceNs = 0
-            remoteBackspaceBurstCount = 0
             lastRemoteVkBackNs = 0
             pendingRustDeskSentinelOneNs = 0
             pendingRustDeskSentinelAfterBack = false
@@ -454,13 +425,14 @@ public final class TapController: NSObject {
                 if wordChars.last == boundaryChar {
                     wordChars.removeLast()
                 }
+                let target = resolveTargetApp(proxy: proxy, isRemote: isRemote)
                 consumeKey(keyCode, isRemote: isRemote)
                 lastReplaceUptimeNs = nowNs
                 lastReplaceEventTs = event.timestamp
                 injector.realize(
                     .replace(backspaces: backspaces, chars: wordChars),
-                    pid: targetPID,
-                    bundleID: targetBundleID,
+                    pid: target.pid,
+                    bundleID: target.bundleID,
                     triggerTimestamp: event.timestamp,
                     proxy: proxy,
                     isRemote: isRemote
@@ -489,8 +461,6 @@ public final class TapController: NSObject {
                     pendingRustDeskSentinelOneNs = 0
                     pendingRustDeskSentinelAfterBack = false
                     lastRemoteVkBackNs = 0
-                    lastRemoteBackspaceNs = 0
-                    remoteBackspaceBurstCount = 0
                     engine.reset()
                     consumeKey(0, isRemote: true)
                     lastReplaceUptimeNs = nowNs
@@ -500,8 +470,8 @@ public final class TapController: NSObject {
                     }
                     injector.realize(
                         .replace(backspaces: 0, chars: tail),
-                        pid: targetPID,
-                        bundleID: targetBundleID,
+                        pid: activePID,
+                        bundleID: activeBundleID,
                         triggerTimestamp: event.timestamp,
                         proxy: proxy,
                         isRemote: true
@@ -522,8 +492,6 @@ public final class TapController: NSObject {
                    Self.isMobileComposedScalar(firstScalar)
                     || (afterBack && Self.isASCIIAlphabetic(firstScalar)) {
                     lastRemoteVkBackNs = 0
-                    lastRemoteBackspaceNs = 0
-                    remoteBackspaceBurstCount = 0
                     engine.reset()
                     consumeKey(0, isRemote: true)
                     lastReplaceUptimeNs = nowNs
@@ -538,8 +506,8 @@ public final class TapController: NSObject {
                     }
                     injector.realize(
                         .replace(backspaces: 1, chars: characters),
-                        pid: targetPID,
-                        bundleID: targetBundleID,
+                        pid: activePID,
+                        bundleID: activeBundleID,
                         triggerTimestamp: event.timestamp,
                         proxy: proxy,
                         isRemote: true
@@ -568,13 +536,6 @@ public final class TapController: NSObject {
                 proxy: proxy
             )
         }
-
-        let inAutoReplaceBurst = isRemote
-            && remoteDesktopMode == .smartAuto
-            && remoteAutoReplaceUntilNs != 0
-            && eventTimeNs <= remoteAutoReplaceUntilNs
-        lastRemoteBackspaceNs = 0
-        remoteBackspaceBurstCount = 0
 
         if characters.isEmpty {
             engine.reset()
@@ -638,31 +599,18 @@ public final class TapController: NSObject {
             )
         }
 
-        if isRemote && remoteDesktopMode == .smartAuto {
-            if inAutoReplaceBurst {
-                engine.reset()
-                remoteMobileWordActive = Self.isWordContinuationASCII(scalar)
-                return passOrSerialize(
-                    event,
-                    keyCode: keyCode,
-                    isRemote: true,
-                    withinPostReplaceWindow: withinPostReplaceWindow,
-                    proxy: proxy
-                )
+        if isRemote && remoteDesktopMode == .smartAuto && remoteMobileWordActive {
+            engine.reset()
+            if !Self.isWordContinuationASCII(scalar) {
+                remoteMobileWordActive = false
             }
-            if remoteMobileWordActive {
-                engine.reset()
-                if !Self.isWordContinuationASCII(scalar) {
-                    remoteMobileWordActive = false
-                }
-                return passOrSerialize(
-                    event,
-                    keyCode: keyCode,
-                    isRemote: true,
-                    withinPostReplaceWindow: withinPostReplaceWindow,
-                    proxy: proxy
-                )
-            }
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: true,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         let action = engine.process(ch)
@@ -676,19 +624,30 @@ public final class TapController: NSObject {
                 proxy: proxy
             )
         case .replace(let backspaces, let chars):
+            let target = resolveTargetApp(proxy: proxy, isRemote: isRemote)
             consumeKey(keyCode, isRemote: isRemote)
             lastReplaceUptimeNs = nowNs
             lastReplaceEventTs = event.timestamp
             injector.realize(
                 .replace(backspaces: backspaces, chars: chars),
-                pid: targetPID,
-                bundleID: targetBundleID,
+                pid: target.pid,
+                bundleID: target.bundleID,
                 triggerTimestamp: event.timestamp,
                 proxy: proxy,
                 isRemote: isRemote
             )
             return nil
         }
+    }
+
+    private func resolveTargetApp(proxy: CGEventTapProxy?, isRemote: Bool) -> (pid: pid_t, bundleID: String?) {
+        guard proxy != nil && !isRemote else {
+            return (activePID, activeBundleID)
+        }
+        return SelectionCacheService.shared.resolveFocusedOverlayApp(
+            currentPID: activePID,
+            currentBundleID: activeBundleID
+        )
     }
 
     private func passOrSerialize(
@@ -722,9 +681,6 @@ public final class TapController: NSObject {
     private func resetRemoteInputState() {
         lastEventWasRemote = false
         remoteMobileWordActive = false
-        remoteAutoReplaceUntilNs = 0
-        lastRemoteBackspaceNs = 0
-        remoteBackspaceBurstCount = 0
         remoteZeroKeyConsumedCount = 0
         lastRemoteVkBackNs = 0
         pendingRustDeskSentinelOneNs = 0
