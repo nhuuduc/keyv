@@ -4,8 +4,7 @@
 pub enum InputMethod {
     /// Telex: full engine with restore-on-invalid semantics.
     Telex,
-    /// Simple Telex: transforms apply immediately, no invalid-key restore
-    /// policies (P1: shares the Telex code path; diverges in later phases).
+    /// Simple Telex: transforms apply without standalone w-shorthand expansion.
     SimpleTelex,
     /// VNI digit-based marks.
     Vni,
@@ -39,6 +38,8 @@ pub struct Config {
     pub repeated_restore: bool,
     /// Capitalize the first letter after a sentence terminator (. ! ?).
     pub auto_capitalize: bool,
+    /// Vietnamese phonotactic check & English raw-word restore.
+    pub spell_check: bool,
 }
 
 impl Default for Config {
@@ -50,6 +51,7 @@ impl Default for Config {
             allow_w_consonant: true,
             repeated_restore: true,
             auto_capitalize: false,
+            spell_check: false,
         }
     }
 }

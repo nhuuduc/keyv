@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-build:
+    name: Rust Engine & macOS Universal App
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Rust unit & UniKey parity tests
+        run: cargo test --workspace
+
+      - name: Build universal KeyV.app & run Swift smoke suite
+        env:
+          KEYV_UNIVERSAL: "1"
+        run: ./scripts/build.sh
+
+      - name: Verify universal binary architectures, ad-hoc & persistent signing, and packaging
+        run: |
+          ARCHS="$(lipo -archs apps/keyv-app/KeyV.app/Contents/MacOS/KeyVApp)"
+          echo "KeyVApp architectures: $ARCHS"
+          echo "$ARCHS" | grep -q "arm64"
+          echo "$ARCHS" | grep -q "x86_64"
+          codesign --verify --deep --strict --verbose=2 apps/keyv-app/KeyV.app
+          ./scripts/setup_signing_cert.sh
+          KEYV_UNIVERSAL=1 ./scripts/make_app.sh
+          codesign --verify --deep --strict --verbose=2 apps/keyv-app/KeyV.app
+          ./scripts/package_release.sh dist

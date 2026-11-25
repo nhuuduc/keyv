@@ -1,5 +1,6 @@
 # Rust
 target/
+dist/
 
 # Swift / SPM
 apps/keyv-app/.build/

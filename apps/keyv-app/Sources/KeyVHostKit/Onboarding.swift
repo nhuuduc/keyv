@@ -34,7 +34,6 @@ public enum KeyVIcon {
             image.isTemplate = false
             return image
         }
-        // Fallback: app-bundle .icns (ships with every release).
         if let image = NSImage(named: "KeyV") {
             image.isTemplate = false
             return image
@@ -75,56 +74,167 @@ public struct OnboardingView: View {
     public init(checkAgain: @escaping () -> Void = {}) { self.checkAgain = checkAgain }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 16) {
-                if let icon = KeyVIcon.swiftImage(size: 64) {
-                    icon.resizable().frame(width: 64, height: 64)
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                if let icon = KeyVIcon.swiftImage(size: 56) {
+                    icon.resizable().frame(width: 56, height: 56)
+                } else {
+                    Image(systemName: "keyboard.badge.ellipsis")
+                        .font(.system(size: 40))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 56, height: 56)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Thiết lập KeyV").font(.system(size: 25, weight: .semibold))
-                    Text("Gõ tiếng Việt trong các ứng dụng của bạn")
+                    Text("Thiết lập KeyV")
+                        .font(.system(size: 23, weight: .bold))
+                    Text("Bộ gõ tiếng Việt tốc độ cao & lịch sử clipboard bảo mật")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
+                Spacer()
+                permissionBadge
             }
+
             Divider()
-            Label(model.status == .hookUnavailable ? "Đã có quyền · Bộ gõ chưa kết nối" : "Cần quyền điều khiển bàn phím",
-                  systemImage: model.status == .hookUnavailable ? "exclamationmark.triangle" : "lock.shield")
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    model.status == .hookUnavailable
+                        ? "Đã cấp quyền · Đang chờ kết nối bàn phím"
+                        : "Cấp quyền Trợ năng (Accessibility)",
+                    systemImage: model.status == .hookUnavailable ? "exclamationmark.triangle.fill" : "hand.raised.shield.fill"
+                )
                 .font(.headline)
-            Text(model.status == .hookUnavailable
-                 ? "macOS đã cấp quyền Trợ năng nhưng chưa cho KeyV kết nối bàn phím. Hãy thử kiểm tra lại; nếu vẫn chưa được, thoát rồi mở lại KeyV."
-                 : "KeyV cần quyền Trợ năng để nhận phím và chèn chữ tiếng Việt. Nội dung được xử lý trên máy của bạn.")
+                .foregroundStyle(model.status == .hookUnavailable ? .orange : .primary)
+
+                Text(
+                    model.status == .hookUnavailable
+                        ? "macOS đã ghi nhận quyền nhưng chưa cho phép phiên chạy hiện tại lắng nghe bàn phím. Hãy nhấn \"Kiểm tra lại\" hoặc khởi động lại KeyV."
+                        : "KeyV cần quyền Trợ năng của macOS để xử lý tổ hợp dấu tiếng Việt theo thời gian thực. Mọi dữ liệu gõ phím được xử lý cục bộ ngay trên máy của bạn."
+                )
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 12) {
-                Text("1. Mở Cài đặt hệ thống bằng nút bên dưới.")
-                Text("2. Bật KeyV trong Trợ năng / Device Control and Data Access.")
-                Text("3. Quay lại đây. KeyV sẽ tự kiểm tra quyền.")
             }
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(16)
+
+            VStack(alignment: .leading, spacing: 12) {
+                stepRow(
+                    number: 1,
+                    symbol: "gearshape.fill",
+                    title: "Mở Cài đặt Hệ thống → Trợ năng",
+                    detail: "Nhấn nút \"Mở Cài đặt Trợ năng…\" bên dưới để chuyển thẳng tới mục cấp quyền."
+                )
+                Divider()
+                stepRow(
+                    number: 2,
+                    symbol: "switch.2",
+                    title: "Bật công tắc cho phép KeyV",
+                    detail: "Tìm ứng dụng KeyV trong danh sách và chuyển công tắc sang trạng thái bật."
+                )
+                Divider()
+                stepRow(
+                    number: 3,
+                    symbol: "checkmark.circle.fill",
+                    title: "Tự động kích hoạt",
+                    detail: "Quay lại cửa sổ này — KeyV tự động nhận quyền và thu gọn lên thanh menu."
+                )
+            }
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
-            Text("Đã bật nhưng vẫn chưa nhận? Bản app có thể đã thay đổi sau khi build. Hãy xóa mục KeyV cũ trong danh sách, rồi thêm đúng bản đang chạy bên dưới và bật lại.")
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Hiện app trong Finder") {
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Mẹo khắc phục khi đã bật nhưng chưa nhận quyền", systemImage: "wrench.and.screwdriver")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Nếu vừa cài đè bản build cục bộ, hãy xóa mục KeyV cũ bằng nút dấu trừ (–) trong Trợ năng rồi kéo bản đang chạy bên dưới vào lại:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(Bundle.main.bundlePath)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .quaternaryLabelColor).opacity(0.25), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            HStack(spacing: 10) {
+                Button {
                     NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+                } label: {
+                    Label("Hiện trong Finder", systemImage: "folder")
                 }
+
                 Spacer()
+
                 Button("Kiểm tra lại", action: checkAgain)
-                Button("Mở Cài đặt…") {
+
+                Button {
                     AccessibilityGate.openSettingsPane()
+                } label: {
+                    Label("Mở Cài đặt Trợ năng…", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
-            Text(Bundle.main.bundlePath)
-                .font(.caption).foregroundStyle(.tertiary)
-                .lineLimit(2).textSelection(.enabled)
         }
-        .padding(28)
-        .frame(width: 520)
+        .padding(24)
+        .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var permissionBadge: some View {
+        let (title, symbol, color): (String, String, Color) = {
+            switch model.status {
+            case .ready:
+                return ("Đã sẵn sàng", "checkmark.shield.fill", .green)
+            case .hookUnavailable:
+                return ("Chờ kết nối", "exclamationmark.shield.fill", .orange)
+            case .permissionRequired:
+                return ("Cần cấp quyền", "lock.shield.fill", .orange)
+            }
+        }()
+        return Label(title, systemImage: symbol)
+            .font(.system(size: 11.5, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(color.opacity(0.14), in: Capsule())
+            .overlay(Capsule().strokeBorder(color.opacity(0.35), lineWidth: 1))
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func stepRow(number: Int, symbol: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.15))
+                    .frame(width: 26, height: 26)
+                Text("\(number)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.accentColor)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

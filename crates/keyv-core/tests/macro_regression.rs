@@ -13,6 +13,7 @@ fn macro_enabled_typer_handles_plain_typing() {
         allow_w_consonant: true,
         repeated_restore: true,
         auto_capitalize: false,
+        spell_check: false,
     };
     let mut typer = Typer::new(cfg, MacroTable::new());
     typer.set_macro("hvbt", "nhé bạn");
@@ -32,6 +33,7 @@ fn macro_expansion_fires_on_match() {
         allow_w_consonant: true,
         repeated_restore: true,
         auto_capitalize: false,
+        spell_check: false,
     };
     let mut typer = Typer::new(cfg, MacroTable::new());
     typer.set_macro("hvbt", "nhé bạn");
@@ -60,6 +62,7 @@ fn macro_disabled_no_expansion() {
         allow_w_consonant: true,
         repeated_restore: true,
         auto_capitalize: false,
+        spell_check: false,
     };
     let mut typer = Typer::new(cfg, MacroTable::new());
     typer.set_macro("hvbt", "nhé bạn");

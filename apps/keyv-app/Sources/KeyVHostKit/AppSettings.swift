@@ -35,8 +35,14 @@ final class AppSettings: NSObject {
         set { defaults.set(newValue, forKey: "repeatedRestore"); notifyChanged() }
     }
 
-    /// "Sửa lỗi gõ ý (trình duyệt, Excel,...)" — chèn U+200C force-deselect
-    /// cho các app compatibility là inline autocomplete.
+    /// Kiểm tra chính tả tiếng Việt & tự khôi phục từ tiếng Anh.
+    var spellCheck: Bool {
+        get { defaults.object(forKey: "spellCheck") == nil ? true : defaults.bool(forKey: "spellCheck") }
+        set { defaults.set(newValue, forKey: "spellCheck"); notifyChanged() }
+    }
+
+    /// "Sửa lỗi gợi ý (trình duyệt, Excel,...)" — chèn U+200C force-deselect
+    /// cho các app compatibility có inline autocomplete.
     var compatFix: Bool {
         get { defaults.object(forKey: "compatFix") == nil ? true : defaults.bool(forKey: "compatFix") }
         set { defaults.set(newValue, forKey: "compatFix"); notifyChanged() }
@@ -52,6 +58,37 @@ final class AppSettings: NSObject {
     var beepOnModeSwitch: Bool {
         get { defaults.object(forKey: "beepOnModeSwitch") == nil ? true : defaults.bool(forKey: "beepOnModeSwitch") }
         set { defaults.set(newValue, forKey: "beepOnModeSwitch"); notifyChanged() }
+    }
+
+    /// Đổi nhanh Việt / Anh bằng tổ hợp Ctrl + Shift (kiểu UniKey Windows).
+    var ctrlShiftSwitch: Bool {
+        get { defaults.object(forKey: "ctrlShiftSwitch") == nil ? true : defaults.bool(forKey: "ctrlShiftSwitch") }
+        set { defaults.set(newValue, forKey: "ctrlShiftSwitch"); notifyChanged() }
+    }
+
+    var toggleHotKeyCode: Int {
+        get { defaults.object(forKey: "toggleHotKeyCode") == nil ? 6 : defaults.integer(forKey: "toggleHotKeyCode") }
+        set { defaults.set(newValue, forKey: "toggleHotKeyCode"); notifyChanged() }
+    }
+
+    var toggleHotKeyModifiers: UInt {
+        get {
+            guard let stored = defaults.object(forKey: "toggleHotKeyModifiers") as? UInt else {
+                return UInt(optionKey)
+            }
+            return stored
+        }
+        set { defaults.set(newValue, forKey: "toggleHotKeyModifiers"); notifyChanged() }
+    }
+
+    var autoCheckUpdates: Bool {
+        get { defaults.object(forKey: "autoCheckUpdates") == nil ? true : defaults.bool(forKey: "autoCheckUpdates") }
+        set { defaults.set(newValue, forKey: "autoCheckUpdates"); notifyChanged() }
+    }
+
+    var lastUpdateCheckTimestamp: Double {
+        get { defaults.double(forKey: "lastUpdateCheckTimestamp") }
+        set { defaults.set(newValue, forKey: "lastUpdateCheckTimestamp") }
     }
 
     /// Chế độ gõ đang "hiển thị" ở menu bar: English (off) hay Vietnamese.
@@ -70,7 +107,7 @@ final class AppSettings: NSObject {
     }
 
     var overlayHotKeyCode: Int {
-        get { defaults.object(forKey: "overlayHotKeyCode") == nil ? 49 : defaults.integer(forKey: "overlayHotKeyCode") } // Space
+        get { defaults.object(forKey: "overlayHotKeyCode") == nil ? 49 : defaults.integer(forKey: "overlayHotKeyCode") }
         set { defaults.set(newValue, forKey: "overlayHotKeyCode"); notifyChanged() }
     }
 

@@ -10,7 +10,7 @@ use crate::word::WordBuffer;
 use crate::{telex, vni};
 
 /// Maximum tracked chars per word session (safety bound).
-pub const MAX_WORD_LEN: usize = 16;
+pub const MAX_WORD_LEN: usize = 32;
 
 /// Engine decision for one pressed character key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +28,6 @@ pub struct Typer {
     cfg: Config,
     macros: MacroTable,
     buf: WordBuffer,
-    macro_probe: String,
     /// Next letter starts a sentence (after . ! ? newline).
     sentence_start: bool,
 }
@@ -39,7 +38,6 @@ impl Typer {
             cfg,
             macros,
             buf: WordBuffer::default(),
-            macro_probe: String::new(),
             sentence_start: true,
         }
     }
@@ -67,7 +65,11 @@ impl Typer {
     /// Clear session state (focus change, mouse click, app switch…).
     pub fn reset(&mut self) {
         self.buf.clear();
-        self.macro_probe.clear();
+    }
+
+    /// Synchronize session state when the user presses Backspace.
+    pub fn backspace(&mut self) {
+        self.buf.pop_backspace();
     }
 
     /// Current tracked word, rendered — useful for overlay/debug UI.
@@ -85,7 +87,6 @@ impl Typer {
 
         let lc = ch.to_lowercase().next().unwrap_or(ch);
         if !lc.is_ascii() {
-            // Non-ASCII or precomposed input: pass through, reset session.
             self.reset();
             return EngineAction::Pass;
         }
@@ -94,7 +95,7 @@ impl Typer {
         // keep it armed (". hello" → ". Hello"), other separators disarm.
         if self.cfg.auto_capitalize {
             match lc {
-                '.' | '!' | '?' | '\n' => self.sentence_start = true,
+                '.' | '!' | '?' | '\n' | '\r' => self.sentence_start = true,
                 ' ' | '\t' => {}
                 _ if !lc.is_ascii_alphabetic() => self.sentence_start = false,
                 _ => {}
@@ -102,52 +103,58 @@ impl Typer {
         }
 
         if lc.is_ascii_alphabetic() {
-            // Sentence-start capitalization: the lowercase key is consumed
-            // and re-emitted uppercase (Replace{0} — nothing to erase).
+            let mut effective_ch = ch;
+            let mut capitalized_first = false;
             if self.cfg.auto_capitalize
                 && self.sentence_start
                 && self.buf.is_empty()
-                && self.macro_probe.is_empty()
                 && ch.is_lowercase()
             {
                 self.sentence_start = false;
-                let upper = ch.to_uppercase().next().unwrap_or(ch);
-                self.buf.push(upper);
-                return EngineAction::Replace {
-                    n: 0,
-                    chars: upper.to_string(),
-                };
-            }
-            if self.cfg.macro_enabled {
-                let mut cand = self.macro_probe.clone();
-                cand.push(lc);
-                if let Some(value) = self.macros.exact(&cand).cloned() {
-                    // Host accounting: every prior probe char was passed
-                    // through and rendered; only the CURRENT char is
-                    // host-side unrendered (this event is consumed). So the
-                    // displayed region to erase is len-1, mirroring letter
-                    // transforms (`dd` → n=1 for 2 typed chars).
-                    let n = cand.chars().count().saturating_sub(1).min(u8::MAX as usize) as u8;
-                    self.macro_probe.clear();
-                    self.buf.clear();
-                    return EngineAction::Replace { n, chars: value };
-                }
-                if self.macros.has_prefix(&cand) {
-                    self.macro_probe = cand;
-                    self.buf.push(ch);
-                    return EngineAction::Pass;
-                }
-                self.macro_probe.clear();
-                // fall through into the word engine
+                effective_ch = ch.to_uppercase().next().unwrap_or(ch);
+                capitalized_first = true;
+            } else if self.cfg.auto_capitalize && self.sentence_start {
+                self.sentence_start = false;
             }
 
-            return match self.cfg.method {
-                InputMethod::Telex | InputMethod::SimpleTelex => {
-                    telex::step(&mut self.buf, &self.cfg, ch)
+            if self.cfg.macro_enabled && !self.macros.is_empty() {
+                let mut raw_cand: String = self
+                    .buf
+                    .raw_keys
+                    .iter()
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect();
+                raw_cand.push(lc);
+                if let Some(value) = self.macros.exact(&raw_cand).cloned() {
+                    let all_upper = self.buf.raw_keys.len() + 1 >= 2
+                        && self.buf.raw_keys.iter().all(|c| c.is_uppercase())
+                        && ch.is_uppercase();
+                    let expanded = if all_upper {
+                        value.to_uppercase()
+                    } else {
+                        value
+                    };
+                    let n = self.buf.len().min(u8::MAX as usize) as u8;
+                    self.buf.clear();
+                    return EngineAction::Replace { n, chars: expanded };
                 }
-                InputMethod::Vni => vni::step(&mut self.buf, &self.cfg, ch),
+            }
+
+            let action = match self.cfg.method {
+                InputMethod::Telex | InputMethod::SimpleTelex => {
+                    telex::step(&mut self.buf, &self.cfg, effective_ch)
+                }
+                InputMethod::Vni => vni::step(&mut self.buf, &self.cfg, effective_ch),
                 InputMethod::Off => engine_pass(),
             };
+
+            if capitalized_first && matches!(action, EngineAction::Pass) {
+                return EngineAction::Replace {
+                    n: 0,
+                    chars: effective_ch.to_string(),
+                };
+            }
+            return action;
         }
 
         // VNI digit modifiers operate on the live word session.
@@ -156,7 +163,6 @@ impl Typer {
         }
 
         // Digits/punctuation close the session and pass through.
-        self.macro_probe.clear();
         self.buf.clear();
         EngineAction::Pass
     }

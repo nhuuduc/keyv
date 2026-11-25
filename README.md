@@ -2,47 +2,35 @@
 
 # KeyV — Bộ gõ tiếng Việt cho macOS
 
-Bộ gõ tiếng Việt trên thanh menu, kết hợp lịch sử clipboard, viết bằng **Rust + SwiftUI/AppKit**. Engine chạy trực tiếp trong ứng dụng qua C ABI, không cần dịch vụ mạng.
+Bộ gõ tiếng Việt trên thanh menu kết hợp lịch sử clipboard mã hóa, viết bằng **Rust + SwiftUI/AppKit**. Engine chạy trực tiếp trong tiến trình ứng dụng qua C ABI (không IPC, không yêu cầu mạng khi gõ).
 
-> **Đang phát triển.** KeyV hướng đến thói quen gõ UniKey trên Windows nhưng chưa tương thích hoàn toàn. Hiện phát hành mã nguồn; chưa có bản cài đặt được notarize hay bộ kiểm thử gõ thật đầy đủ trên mọi ứng dụng.
+![Giao diện bộ gõ KeyV](docs/screenshots/typing.png)
 
-Giao diện cài đặt mới tách **Ngôn ngữ đang gõ** khỏi **Mở lịch sử clipboard**.
-Phím tắt hiển thị bằng tên phím đầy đủ, ví dụ **Option + Space**, kèm hướng dẫn bấm để đổi.
+## Tính năng nổi bật
 
-![Giao diện bộ gõ KeyV ở bản trước khi tách khối điều khiển](docs/screenshots/typing.png)
-
-## Tính năng
-
-| Chức năng | Hiện trạng |
+| Chức năng | Chi tiết |
 | --- | --- |
-| Kiểu gõ | Telex, Simple Telex, VNI và chế độ English |
-| Unicode | Chữ thường, chữ hoa và 5 dấu thanh |
-| Đặt dấu | Kiểu cũ / mới cho các vần như òa / oà, úy / uý |
-| Phím lặp | Khôi phục dấu và chữ: `ww`, `aaa`, `ddd`, `guitarr`; VNI có khôi phục dấu thanh lặp |
-| Cấu hình ứng dụng | Chọn kiểu gõ và kiểu dấu riêng theo bundle ID |
-| Gõ tắt | Bảng TSV, nạp lại khi lưu, bật/tắt trong cài đặt |
-| Clipboard | Văn bản, ảnh, URL tệp; lịch sử lưu bằng SQLite, payload mã hóa AES-256-GCM |
-| Tiện ích | Phím mở clipboard tùy chỉnh, giới hạn lịch sử, khởi động cùng hệ thống |
+| Kiểu gõ chuẩn UniKey | Telex (bỏ dấu tự do, `ươ` một phím `w`, `gi`/`qu`, nguyên âm ba `oai/oay/uyu/uyê/...`), Simple Telex, VNI (`dang9`, `duong972`,…) và chế độ English |
+| Đặt dấu & tái định vị | Hỗ trợ kiểu cũ (`òa, úy`) / kiểu mới (`oà, uý`); tự động dời vị trí dấu thanh khi gõ thêm nguyên âm hoặc phụ âm cuối (`toafn` → `toàn`, `gifa` → `già`, `qura` → `quả`) |
+| Kiểm tra chính tả & tiếng Anh | Nhận diện cấu trúc âm tiết tiếng Việt, giữ nguyên từ tiếng Anh (`terminal`, `macos`, `github`, `Swift`, `Windows`,…) và tự khôi phục phím lặp (`aaa`, `ddd`, `aww`, `dduoww`, `barr`) |
+| Đồng bộ Backspace & đa ứng dụng | Xóa lùi (`⌫`) giữ nguyên trạng thái âm tiết đang gõ; tương thích trình duyệt (Chrome, Safari, Arc, Brave, Firefox), Electron (VS Code, Notion), Terminal/iTerm2/Ghostty, Spotlight và hộp thoại Open/Save |
+| Chuyển nhanh Việt / Anh | Bấm **Ctrl + Shift** (kiểu UniKey Windows), phím tắt tùy chỉnh (**Option + Z** mặc định) hoặc biểu tượng **V / E** trên thanh menu |
+| Cấu hình theo ứng dụng | Chọn kiểu gõ và kiểu dấu riêng theo từng `bundleIdentifier` |
+| Gõ tắt (Macro) | Bảng TSV nạp trực tiếp khi lưu, hỗ trợ tự động viết hoa khi gõ tắt IN HOA (`DDK` → `ĐĂNG KÝ`) |
+| Lịch sử Clipboard | Văn bản, ảnh, tệp; lưu SQLite mã hóa AES-256-GCM với khóa trong macOS Keychain, bỏ qua dữ liệu nhạy cảm (`ConcealedType`) |
+| Tự động cập nhật | Kiểm tra bản mới từ **GitHub Releases** (`nhuuduc/keyv`), xác minh SHA-256 & chữ ký số `codesign`, thay thế `.app` an toàn và tự khởi động lại |
 
 ## Ảnh giao diện
 
-Các ảnh dưới đây chụp bản trước khi tách khối điều khiển ngôn ngữ và clipboard; bố cục phần trên chưa phản ánh thay đổi mới nhất. Đây là ảnh cửa sổ ứng dụng thật trên macOS. Các sửa engine mới nhất trong mã nguồn không làm thay đổi bố cục này. Không đưa nội dung clipboard cá nhân lên repository.
-
 ### Cài đặt riêng cho ứng dụng
-
-Chọn **Theo mặc định** để bỏ cấu hình riêng và dùng thiết lập chung.
 
 ![Cài đặt ứng dụng](docs/screenshots/apps.png)
 
 ### Gõ tắt
 
-Mỗi dòng chứa phím tắt, một ký tự **Tab thật**, rồi nội dung thay thế. Ví dụ `hvbt` → `Nhé bạn`. Lưu bảng và bật gõ tắt để sử dụng.
-
 ![Gõ tắt](docs/screenshots/macros.png)
 
 ### Hệ thống và clipboard
-
-Phím mặc định mở lịch sử clipboard là **⌥ Space**. Đây không phải phím chuyển Việt/Anh. Dùng ↑/↓ để chọn, Return để dán và Esc để đóng. Tab Hệ thống cho phép đặt số mục lưu và xóa lịch sử.
 
 ![Hệ thống](docs/screenshots/system.png)
 
@@ -51,108 +39,96 @@ Phím mặc định mở lịch sử clipboard là **⌥ Space**. Đây không p
 
 ![Thông tin](docs/screenshots/about.png)
 
-Ảnh tab Thông tin còn hiển thị số phiên bản và thông tin hiệu năng từ bản phát triển. Chưa có benchmark độc lập xác nhận độ trễ ≤1 ms; không xem đó là cam kết hiệu năng.
-
 </details>
 
-## Build và chạy
+## Cài đặt & Build từ mã nguồn
 
 ### Yêu cầu
 
 - macOS 14 trở lên.
-- Rust hỗ trợ edition 2024 (Rust 1.88+; dùng bản stable mới nhất).
-- Swift 5.10+ và toolchain tương thích SDK macOS của máy; cài Xcode hoặc Command Line Tools.
-- Bộ công cụ `cargo`, `swift`, `codesign`, `iconutil` có trong PATH.
+- Rust hỗ trợ edition 2024 (Rust 1.88+ stable).
+- Swift 5.10+ (Xcode hoặc Command Line Tools).
+- Công cụ hệ thống: `cargo`, `swift`, `codesign`, `openssl`, `ditto`, `hdiutil`.
+
+### Build nhanh (giữ quyền Trợ năng qua các lần build/cập nhật)
 
 ```bash
 git clone https://github.com/nhuuduc/keyv.git
 cd keyv
+
+# 1. Tạo chứng chỉ ký code cục bộ một lần duy nhất (giữ quyền Accessibility không bị mất khi build lại)
+./scripts/setup_signing_cert.sh
+
+# 2. Build Rust core + Swift app + chạy bộ test và đóng gói KeyV.app
 ./scripts/build.sh
 open apps/keyv-app/KeyV.app
 ```
 
-Script build Rust static library, build các target Swift, chạy `KeyVSmoke`, đóng gói rồi kiểm tra chữ ký app. Build hiện tại được kiểm tra trên Apple Silicon; chưa xác nhận Intel hoặc universal binary.
-
-### Cấp quyền Trợ năng
-
-KeyV cần quyền Trợ năng để nhận phím và chèn chữ vào ứng dụng đang gõ:
-
-1. Mở KeyV và chọn **Mở Cài đặt…**.
-2. Bật KeyV tại **Privacy & Security → Accessibility**, hoặc **Device Control and Data Access** tùy phiên bản macOS.
-3. Quay lại KeyV hoặc bấm **Kiểm tra lại**. App chỉ báo sẵn sàng khi tạo được keyboard event tap.
-
-Nếu công tắc đã bật mà app vẫn chưa nhận: bản build mới có thể không khớp chữ ký đã được macOS cấp quyền. Dùng **Hiện app trong Finder**, xóa mục KeyV cũ khỏi danh sách quyền rồi thêm đúng bản hiện tại. Có thể cần thoát và mở lại app.
-
-Build mặc định ký **ad-hoc**: chữ ký định danh có thể thay đổi mỗi lần build. Để giữ danh tính qua các bản build, sử dụng cùng chứng chỉ ký code đã cài trong Keychain:
+Để đóng gói bản phân phối Universal (`arm64` + `x86_64`) kèm `.zip`, `.dmg` và `SHA256SUMS.txt`:
 
 ```bash
-KEYV_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./scripts/build.sh
+KEYV_UNIVERSAL=1 ./scripts/build.sh
+./scripts/package_release.sh dist
 ```
 
-Dự án không kèm chứng chỉ, không tự cấp quyền và không tự sửa cơ sở dữ liệu quyền của macOS.
+## Ký số (Code Signing) & Giữ quyền Trợ năng (TCC)
 
-## Gõ tiếng Việt và tiếng Anh
+macOS quản lý quyền **Privacy & Security → Accessibility** dựa trên *Designated Requirement* của chữ ký số trong `KeyV.app`:
 
-Để gõ `win` thành đúng `win`, bật **Giữ w đầu từ làm phụ âm**. Nếu tắt tùy chọn này, `w` đầu từ là phím viết nhanh `ư`; bật khôi phục phím lặp để dùng `ww` trả về `w`.
+- Nếu ký `ad-hoc` (`codesign --sign -`), macOS gắn quyền vào mã băm `cdhash` của từng file nhị phân — mỗi lần cập nhật hoặc build lại sẽ phải bật lại quyền Trợ năng.
+- Khi ký bằng **chứng chỉ cố định** (`Developer ID Application` hoặc chứng chỉ tự ký `KeyV Code Signing` tạo bởi `./scripts/setup_signing_cert.sh`), macOS neo quyền vào định danh `app.keyv.host` + chứng chỉ gốc, giúp **quyền Trợ năng được giữ nguyên xuyên suốt các bản cập nhật**.
 
-| Phím gõ | Kết quả trong engine |
-| --- | --- |
-| `ddawng` | đăng |
-| `tieengs Vieetj` | tiếng Việt |
-| `dduwowngf` | đường |
-| `toanfs` | toán |
-| `aaa`, `eee`, `ooo`, `ddd` | aa, ee, oo, dd khi bật khôi phục |
-| `wwin` | win khi tắt giữ w đầu từ và bật khôi phục |
-| `e11` (VNI) | e1 khi bật khôi phục |
+### Cấu hình GitHub Secrets cho CI/CD Release (tùy chọn, làm 1 lần)
 
-Quy tắc tham khảo: [hướng dẫn UniKey](https://www.unikey.org/support/ukmanual.html). Các bài kiểm tra được viết theo quy tắc công khai; dự án không nhúng engine UniKey.
+Workflow [`.github/workflows/release.yml`](.github/workflows/release.yml) tự động build Universal `.app`, `.zip`, `.dmg`, `SHA256SUMS.txt` và phát hành lên **GitHub Releases** khi đẩy tag `v*` (ví dụ `git tag v0.3.0 && git push origin v0.3.0`) hoặc bấm **Run workflow**.
 
-Tùy chọn giữ `w` chỉ áp dụng đầu từ, không tự nhận diện mọi từ tiếng Anh. Để nhập tiếng Anh nguyên trạng, chuyển sang **English** qua menu V/E. Tránh chạy đồng thời nhiều bộ gõ tiếng Việt trên cùng luồng phím.
+Để mọi bản phát hành từ GitHub Actions giữ nguyên chữ ký số (giúp người dùng cập nhật tự động không mất quyền Accessibility):
+
+1. **Dùng chứng chỉ `KeyV Code Signing` (miễn phí, không cần tài khoản Apple Developer trả phí):**
+   Chạy lệnh sau trên máy Mac để xuất giá trị Base64 và mật khẩu:
+   ```bash
+   ./scripts/setup_signing_cert.sh --export-ci
+   ```
+   Sau đó thêm 2 Repository Secrets trên GitHub (`Settings → Secrets and variables → Actions`):
+   - `KEYV_CERT_P12_BASE64`: chuỗi Base64 của file `.p12`
+   - `KEYV_CERT_PASSWORD`: mật khẩu bảo vệ file `.p12`
+
+2. **Hoặc dùng chứng chỉ `Developer ID Application` của Apple (+ Notarization tùy chọn):**
+   Xuất chứng chỉ `Developer ID Application` ra `.p12`, đặt vào `KEYV_CERT_P12_BASE64` và `KEYV_CERT_PASSWORD`. Nếu muốn tự động **Apple Notarize + Staple** file `.dmg`/`.app`, thêm tiếp 3 secrets:
+   - `APPLE_ID`: email tài khoản Apple Developer
+   - `APPLE_TEAM_ID`: mã Team ID 10 ký tự
+   - `APPLE_APP_SPECIFIC_PASSWORD`: mật khẩu ứng dụng tạo tại `appleid.apple.com`
+
+*(Nếu chưa cấu hình bất kỳ secret nào, GitHub Actions vẫn build và phát hành bình thường với định danh cố định `app.keyv.host`.)*
+
+## Quy tắc gõ tiếng Việt & tiếng Anh tham khảo
+
+| Chuỗi phím | Kết quả | Ghi chú |
+| --- | --- | --- |
+| `dduowngf`, `dduongwf`, `duongwfd` | `đường` | Bỏ dấu tự do, `uow` / `uo+w` tự thành `ươ` |
+| `nuowcs`, `nguowif`, `ruowuj`, `huowu` | `nước`, `người`, `rượu`, `hươu` | Tự động xử lý vần `ươ` và ba nguyên âm |
+| `thuowr` / `thuowng`, `huow` / `huowng` | `thuở` / `thương`, `huơ` / `hương` | Phân biệt chính xác vần mở `uơ` và vần đóng `ươ` |
+| `toafn`, `gifa`, `qura`, `khuyur` | `toàn`, `già`, `quả`, `khuỷu` | Tự động định vị lại dấu thanh khi gõ thêm âm cuối |
+| `muaw`, `choiw`, `comw`, `nhungwx` | `mưa`, `chơi`, `cơm`, `những` | Bỏ dấu `w` cuối âm tiết kiểu UniKey |
+| `duong972`, `dang9`, `to16` (VNI) | `đường`, `đang`, `tố` | Tương thích VNI gõ số cuối từ |
+| `terminal`, `macos`, `github`, `Windows` | `terminal`, `macos`, `github`, `Windows` | Tự giữ nguyên từ tiếng Anh khi bật Kiểm tra chính tả |
+| `aaa`, `ddd`, `aww`, `dduoww`, `barr` | `aa`, `dd`, `aw`, `đuow`, `bar` | Gõ lặp phím dấu để khôi phục ký tự gốc |
 
 ## Kiểm thử
 
 ```bash
-cargo test --workspace
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ./scripts/build.sh
 ```
 
-Hiện có **33 bài kiểm tra Rust**, gồm 6 nhóm kiểm tra bổ sung cho các quy tắc gần UniKey, cùng kiểm tra Swift qua FFI và hồi quy cài đặt trong `KeyVSmoke`. Các nhóm bao gồm nhiều chuỗi phím.
-
-Kiểm tra tự động không thay thế thử nghiệm bàn phím vật lý: phím tổng hợp từ công cụ automation có thể bị bỏ qua để tránh vòng lặp; autocorrect của ứng dụng đích cũng có thể thay đổi kết quả.
-
 ## Dữ liệu cục bộ
 
-- Lịch sử clipboard: `~/Library/Application Support/KeyV/clipboard.db`.
-- Khóa mã hóa lưu trong macOS Keychain; metadata không được tuyên bố là mã hóa toàn bộ.
+- Lịch sử clipboard: `~/Library/Application Support/KeyV/clipboard.db` (payload mã hóa AES-256-GCM; khóa lưu trong macOS Keychain).
 - Bảng gõ tắt: `~/Library/Application Support/KeyV/macros.tsv`.
-- Cài đặt: UserDefaults của `app.keyv.host`.
-- Bộ thu clipboard bỏ qua các marker concealed/transient/auto-generated mà ứng dụng nguồn cung cấp. Đây không phải cơ chế nhận diện mọi bí mật trong clipboard.
-
-## Kiến trúc
-
-```text
-crates/keyv-core/        Rust engine, Telex/VNI, bảng Unicode, C ABI, tests
-apps/keyv-app/
-  Sources/KeyVCore/      Swift wrapper của Rust engine
-  Sources/KeyVHostKit/   Event tap, chèn chữ, clipboard và giao diện
-  Sources/KeyVApp/       Điểm vào ứng dụng thanh menu
-  Sources/KeyVIME/       Helper InputMethodKit thử nghiệm
-  Sources/KeyVSmoke/     Kiểm tra Swift/FFI
-  Sources/KeyVVisual/    Công cụ render thử, chưa render đủ native controls
-scripts/                Build, tạo icon, đóng gói app
-```
-
-## Giới hạn hiện tại
-
-- Chưa hoàn toàn giống UniKey Windows; Simple Telex còn chia sẻ phần lớn xử lý với Telex.
-- Chưa có tự nhận diện tiếng Anh, kiểm tra chính tả đầy đủ hay hỗ trợ bảng mã TCVN3/VNI. Những tùy chọn chưa triển khai bị vô hiệu hóa trên UI.
-- Chưa kiểm tra toàn diện với mọi trình duyệt, terminal, Excel, ô mật khẩu và autocomplete.
-- InputMethodKit helper là thử nghiệm, không phải đường chạy mặc định.
-- Chưa có bản phát hành notarized, trình tự cập nhật hoặc benchmark đáng tin cậy.
-
-Khi báo lỗi, ghi rõ macOS, ứng dụng đích, kiểu gõ, tùy chọn, chuỗi phím đã bấm và kết quả mong đợi/thực tế. Không đính kèm clipboard hay dữ liệu riêng tư.
+- Cài đặt: `UserDefaults` (`app.keyv.host`).
 
 ## Giấy phép
 
-MIT hoặc Apache-2.0, theo lựa chọn của bạn. Xem [LICENSE-MIT](LICENSE-MIT) và [LICENSE-APACHE](LICENSE-APACHE).
+MIT hoặc Apache-2.0, tùy theo lựa chọn của bạn. Xem [LICENSE-MIT](LICENSE-MIT) và [LICENSE-APACHE](LICENSE-APACHE).
