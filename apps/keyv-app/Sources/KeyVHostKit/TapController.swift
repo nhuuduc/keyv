@@ -9,25 +9,40 @@ import CoreGraphics
 /// `kCGEventTapDisabledByTimeout` / `ByUserInput` (Gotcha 1 listener).
 ///
 /// Threading: the tap is installed on the main run loop, so key handling and
-/// engine state live on the main thread. The callback is fast: O(1) cache
-/// reads only — no AX IPC from inside (see SelectionCacheService).
-final class TapController: NSObject {
+/// engine state live on the main thread.
+public final class TapController: NSObject {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    var engine: ViEngine
-    private let injector: EventInjector
-    var activeBundleID: String?
-    var activePID: pid_t = 0
-    var onModeToggleShortcut: (() -> Void)?
+    public var engine: ViEngine
+    public let injector: EventInjector
+    public var activeBundleID: String?
+    public var activePID: pid_t = 0
+    public var onModeToggleShortcut: (() -> Void)?
+    public var ctrlShiftSwitchEnabled: Bool
+    public var isSecureInputActive: Bool = false
 
     private var ctrlShiftArmed = false
     private var ctrlShiftDisqualified = false
-    private var workspaceObserverInstalled = false
+    private var consumedKeyLo: UInt64 = 0
+    private var consumedKeyHi: UInt64 = 0
+    private var lastReplaceUptimeNs: UInt64 = 0
 
-    init(engine: ViEngine, injector: EventInjector) {
+    private static let postReplaceSerializeWindowNs: UInt64 = 80_000_000
+    private static let nonTypingModifiers: CGEventFlags = [
+        .maskCommand,
+        .maskControl,
+        .maskAlternate,
+        .maskSecondaryFn,
+        .maskNumericPad,
+        .maskHelp,
+    ]
+
+    public init(engine: ViEngine, injector: EventInjector) {
         self.engine = engine
         self.injector = injector
+        self.ctrlShiftSwitchEnabled = AppSettings.shared.ctrlShiftSwitch
+        self.isSecureInputActive = IsSecureEventInputEnabled()
         if let front = NSWorkspace.shared.frontmostApplication {
             self.activeBundleID = front.bundleIdentifier
             self.activePID = front.processIdentifier
@@ -35,17 +50,12 @@ final class TapController: NSObject {
         super.init()
     }
 
-    deinit {
-        if workspaceObserverInstalled {
-            NSWorkspace.shared.notificationCenter.removeObserver(self)
-        }
-    }
-
     @discardableResult
-    func install() -> Bool {
+    public func install() -> Bool {
         if tap != nil { return true }
         let mask = [
             CGEventType.keyDown,
+            .keyUp,
             .flagsChanged,
             .leftMouseDown,
             .rightMouseDown,
@@ -76,29 +86,15 @@ final class TapController: NSObject {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        if !workspaceObserverInstalled {
-            NSWorkspace.shared.notificationCenter.addObserver(
-                self,
-                selector: #selector(workspaceDidActivateApp(_:)),
-                name: NSWorkspace.didActivateApplicationNotification,
-                object: nil
-            )
-            workspaceObserverInstalled = true
-        }
+        refreshSecureInputState()
         return true
     }
 
-    func uninstall() {
+    public func uninstall() {
         ctrlShiftArmed = false
         ctrlShiftDisqualified = false
-        if workspaceObserverInstalled {
-            NSWorkspace.shared.notificationCenter.removeObserver(
-                self,
-                name: NSWorkspace.didActivateApplicationNotification,
-                object: nil
-            )
-            workspaceObserverInstalled = false
-        }
+        clearConsumedKeys()
+        lastReplaceUptimeNs = 0
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -110,15 +106,30 @@ final class TapController: NSObject {
         tap = nil
     }
 
-    @objc private func workspaceDidActivateApp(_ note: Notification) {
+    public func handleApplicationActivated(bundleID: String?, pid: pid_t) {
         ctrlShiftArmed = false
         ctrlShiftDisqualified = false
-        let front = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
-            ?? NSWorkspace.shared.frontmostApplication
-        activeBundleID = front?.bundleIdentifier
-        activePID = front?.processIdentifier ?? 0
+        clearConsumedKeys()
+        lastReplaceUptimeNs = 0
+        activeBundleID = bundleID
+        activePID = pid
+        refreshSecureInputState()
         engine.reset()
-        SelectionCacheService.shared.invalidate()
+    }
+
+    public func refreshCachedSettings() {
+        let settings = AppSettings.shared
+        ctrlShiftSwitchEnabled = settings.ctrlShiftSwitch
+        injector.compatFixEnabled = settings.compatFix
+    }
+
+    public func refreshSecureInputState() {
+        isSecureInputActive = IsSecureEventInputEnabled()
+    }
+
+    @discardableResult
+    public func processEventForTesting(type: CGEventType, event: CGEvent) -> CGEvent? {
+        handleEvent(proxy: nil, type: type, event: event)?.takeUnretainedValue()
     }
 
     // MARK: - Event handling
@@ -128,6 +139,9 @@ final class TapController: NSObject {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            engine.reset()
+            clearConsumedKeys()
+            lastReplaceUptimeNs = 0
             return nil
         default:
             break
@@ -143,80 +157,138 @@ final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
+        if type == .keyUp {
+            let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            return takeConsumedKey(keyCode) ? nil : Unmanaged.passUnretained(event)
+        }
+
         if type == .flagsChanged {
             handleFlagsChanged(event.flags)
             return Unmanaged.passUnretained(event)
         }
 
         ctrlShiftArmed = false
-        if !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty {
+        if !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]).isEmpty {
             ctrlShiftDisqualified = true
         }
 
-        if type != .keyDown || !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
+        if type != .keyDown {
             engine.reset()
-            SelectionCacheService.shared.invalidate()
-            return Unmanaged.passUnretained(event)
-        }
-
-        if IsSecureEventInputEnabled() || SelectionCacheService.shared.isFocusedElementSecure(bundleID: activeBundleID) {
-            engine.reset()
-            SelectionCacheService.shared.scheduleRefresh(bundleID: activeBundleID)
+            lastReplaceUptimeNs = 0
+            refreshSecureInputState()
             return Unmanaged.passUnretained(event)
         }
 
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        _ = takeConsumedKey(keyCode)
+
+        if !event.flags.intersection(Self.nonTypingModifiers).isEmpty {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            return Unmanaged.passUnretained(event)
+        }
+
+        if isSecureInputActive {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            return Unmanaged.passUnretained(event)
+        }
+
         if keyCode == 51 {
             engine.processBackspace()
-            SelectionCacheService.shared.invalidate()
+            return Unmanaged.passUnretained(event)
+        }
+
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+            engine.reset()
+            lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
         // Navigation kills word composition: reset the session.
         if Self.navigationKeyCodes.contains(keyCode) {
             engine.reset()
-            SelectionCacheService.shared.invalidate()
+            lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
         let characters = event.keyboardString()
         guard characters.count == 1, let ch = characters.first else {
             engine.reset()
-            SelectionCacheService.shared.invalidate()
+            lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
-        let pid = activePID != 0 ? activePID : (NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
-        guard pid != 0 else {
-            return Unmanaged.passUnretained(event)
-        }
-        let bundleID = activeBundleID
-
-        // Prefetch selection state for the NEXT replace (async + throttled).
-        SelectionCacheService.shared.scheduleRefresh(bundleID: bundleID)
-
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let hadActiveTransform = engine.hasActiveTransform
         let action = engine.process(ch)
         switch action {
         case .pass:
+            let withinPostReplaceWindow = lastReplaceUptimeNs != 0
+                && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
+            if (withinPostReplaceWindow || hadActiveTransform || engine.hasActiveTransform), ch.isASCII {
+                markKeyConsumed(keyCode)
+                injector.postPassthroughCharacter(ch, triggerTimestamp: event.timestamp, proxy: proxy)
+                return nil
+            }
             return Unmanaged.passUnretained(event)
         case .replace(let backspaces, let chars):
-            injector.realize(.replace(backspaces: backspaces, chars: chars),
-                             pid: pid,
-                             bundleID: bundleID,
-                             proxy: proxy)
+            markKeyConsumed(keyCode)
+            lastReplaceUptimeNs = nowNs
+            injector.realize(
+                .replace(backspaces: backspaces, chars: chars),
+                pid: activePID,
+                bundleID: activeBundleID,
+                triggerTimestamp: event.timestamp,
+                proxy: proxy
+            )
             return nil
         }
     }
 
+    private func markKeyConsumed(_ keyCode: Int) {
+        guard keyCode >= 0 && keyCode < 128 else { return }
+        if keyCode < 64 {
+            consumedKeyLo |= (UInt64(1) << UInt64(keyCode))
+        } else {
+            consumedKeyHi |= (UInt64(1) << UInt64(keyCode - 64))
+        }
+    }
+
+    private func takeConsumedKey(_ keyCode: Int) -> Bool {
+        guard keyCode >= 0 && keyCode < 128 else { return false }
+        if keyCode < 64 {
+            let bit = UInt64(1) << UInt64(keyCode)
+            let wasSet = (consumedKeyLo & bit) != 0
+            consumedKeyLo &= ~bit
+            return wasSet
+        } else {
+            let bit = UInt64(1) << UInt64(keyCode - 64)
+            let wasSet = (consumedKeyHi & bit) != 0
+            consumedKeyHi &= ~bit
+            return wasSet
+        }
+    }
+
+    private func clearConsumedKeys() {
+        consumedKeyLo = 0
+        consumedKeyHi = 0
+    }
+
     private func handleFlagsChanged(_ flags: CGEventFlags) {
+        if flags.contains(.maskSecondaryFn) {
+            ctrlShiftArmed = false
+            ctrlShiftDisqualified = true
+            return
+        }
         let relevant = flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
         if relevant.isEmpty {
             let shouldToggle = ctrlShiftArmed && !ctrlShiftDisqualified
             ctrlShiftArmed = false
             ctrlShiftDisqualified = false
-            if shouldToggle && AppSettings.shared.ctrlShiftSwitch {
+            if shouldToggle && ctrlShiftSwitchEnabled {
                 engine.reset()
-                SelectionCacheService.shared.invalidate()
+                lastReplaceUptimeNs = 0
                 onModeToggleShortcut?()
             }
             return
@@ -225,18 +297,18 @@ final class TapController: NSObject {
             ctrlShiftArmed = false
             ctrlShiftDisqualified = true
             engine.reset()
-            SelectionCacheService.shared.invalidate()
+            lastReplaceUptimeNs = 0
             return
         }
         if relevant == [.maskControl, .maskShift] {
-            if !ctrlShiftDisqualified && AppSettings.shared.ctrlShiftSwitch {
+            if !ctrlShiftDisqualified && ctrlShiftSwitchEnabled {
                 ctrlShiftArmed = true
             }
             return
         }
         if relevant.contains(.maskControl) {
             engine.reset()
-            SelectionCacheService.shared.invalidate()
+            lastReplaceUptimeNs = 0
         }
     }
 
@@ -249,7 +321,7 @@ final class TapController: NSObject {
 
 // MARK: - CGEvent helpers
 
-extension CGEvent {
+public extension CGEvent {
     /// Unicode chars carried by a keyboard event.
     func keyboardString() -> String {
         var length: CFIndex = 0

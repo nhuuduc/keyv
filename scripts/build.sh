@@ -37,7 +37,7 @@ fi
 if [ "${KEYV_UNIVERSAL:-0}" = "1" ]; then
   echo "==> Swift host (release, universal arm64 + x86_64)"
   (cd "$APP" && swift build -c release --arch arm64 --arch x86_64)
-  BIN_DIR="$APP/.build/apple/Products/Release"
+  BIN_DIR="$(cd "$APP" && swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
 else
   echo "==> Swift host (release)"
   (cd "$APP" && swift build -c release)

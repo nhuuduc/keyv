@@ -15,7 +15,7 @@
 //! - anything else defaults to the last vowel
 
 use crate::config::Orthography;
-use crate::engine::EngineAction;
+use crate::engine::{EngineAction, MAX_WORD_LEN};
 use crate::tables::*;
 
 /// A single character of the currently displayed word, decomposed into
@@ -80,8 +80,86 @@ pub struct WordBuffer {
     /// Whether the first displayed horned u came from a standalone w key.
     pub leading_w_expansion: bool,
     pub passthrough: bool,
+    pub escaped_double_tone: bool,
+    pub overflow_count: usize,
     pub raw_keys: Vec<char>,
     pub chars: Vec<ViChar>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DisplayedSnapshot {
+    chars: [char; MAX_WORD_LEN],
+    len: usize,
+}
+
+impl DisplayedSnapshot {
+    pub fn capture(buf: &WordBuffer) -> Self {
+        let mut chars = ['\0'; MAX_WORD_LEN];
+        let len = buf.chars.len().min(MAX_WORD_LEN);
+        for (slot, vc) in chars.iter_mut().zip(buf.chars.iter().take(len)) {
+            *slot = render_char(vc);
+        }
+        Self { chars, len }
+    }
+
+    pub fn as_slice(&self) -> &[char] {
+        &self.chars[..self.len]
+    }
+
+    pub fn diff_to_str(&self, target: &str, passthrough_key: Option<char>) -> EngineAction {
+        let old = self.as_slice();
+        let mut prefix_chars = 0usize;
+        let mut target_count = 0usize;
+        let mut last_target_char = None;
+        for tc in target.chars() {
+            if prefix_chars == target_count && prefix_chars < old.len() && old[prefix_chars] == tc {
+                prefix_chars += 1;
+            }
+            target_count += 1;
+            last_target_char = Some(tc);
+        }
+        let n = (old.len() - prefix_chars).min(u8::MAX as usize) as u8;
+        if n == 0 && target_count == old.len() {
+            return EngineAction::Replace {
+                n: 0,
+                chars: String::new(),
+            };
+        }
+        if n == 0 && target_count == old.len() + 1 && passthrough_key == last_target_char {
+            return EngineAction::Pass;
+        }
+        let suffix: String = target.chars().skip(prefix_chars).collect();
+        EngineAction::Replace { n, chars: suffix }
+    }
+
+    pub fn diff_to_buf(&self, buf: &WordBuffer, passthrough_key: Option<char>) -> EngineAction {
+        let old = self.as_slice();
+        let new_len = buf.chars.len();
+        let mut prefix_chars = 0usize;
+        while prefix_chars < old.len()
+            && prefix_chars < new_len
+            && old[prefix_chars] == render_char(&buf.chars[prefix_chars])
+        {
+            prefix_chars += 1;
+        }
+        let n = (old.len() - prefix_chars).min(u8::MAX as usize) as u8;
+        if n == 0 && new_len == old.len() {
+            return EngineAction::Replace {
+                n: 0,
+                chars: String::new(),
+            };
+        }
+        if n == 0
+            && new_len == old.len() + 1
+            && passthrough_key == Some(render_char(&buf.chars[new_len - 1]))
+        {
+            return EngineAction::Pass;
+        }
+        EngineAction::Replace {
+            n,
+            chars: buf.render_from(prefix_chars),
+        }
+    }
 }
 
 impl WordBuffer {
@@ -90,6 +168,8 @@ impl WordBuffer {
         self.raw_keys.clear();
         self.leading_w_expansion = false;
         self.passthrough = false;
+        self.escaped_double_tone = false;
+        self.overflow_count = 0;
     }
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty()
@@ -110,17 +190,32 @@ impl WordBuffer {
         self.raw_keys.push(ch);
     }
     pub fn pop_backspace(&mut self) {
+        if self.overflow_count > 0 {
+            self.overflow_count -= 1;
+            return;
+        }
         self.chars.pop();
         self.raw_keys.pop();
         if self.chars.is_empty() {
-            self.leading_w_expansion = false;
-            self.passthrough = false;
-        } else if self.passthrough && self.is_valid_vietnamese() {
-            self.passthrough = false;
+            self.clear();
+        } else {
+            if !self.has_any_transform() && self.raw_keys.len() != self.chars.len() {
+                self.raw_keys = self.chars.iter().map(|c| c.ch).collect();
+            }
+            if self.passthrough && self.is_valid_vietnamese() {
+                self.passthrough = false;
+            }
         }
     }
     pub fn has_any_transform(&self) -> bool {
         self.leading_w_expansion || self.chars.iter().any(ViChar::has_mark_or_tone)
+    }
+    pub fn has_explicit_mark(&self) -> bool {
+        self.leading_w_expansion
+            || self
+                .chars
+                .iter()
+                .any(|c| c.stroke || (c.hat && !c.implicit_hat) || c.brev || c.horn)
     }
 
     // ---- telex helpers -------------------------------------------------
@@ -301,6 +396,29 @@ impl WordBuffer {
         {
             return false;
         }
+        if initial == ['c']
+            && !syl.nucleus.is_empty()
+            && matches!(lcs[syl.nucleus[0]], 'i' | 'e' | 'y')
+        {
+            return false;
+        }
+        if initial == ['g'] && !syl.nucleus.is_empty() && matches!(lcs[syl.nucleus[0]], 'e' | 'y') {
+            return false;
+        }
+        if initial == ['n', 'g']
+            && !syl.nucleus.is_empty()
+            && matches!(lcs[syl.nucleus[0]], 'i' | 'e' | 'y')
+        {
+            return false;
+        }
+        if initial == ['p']
+            && syl
+                .nucleus
+                .iter()
+                .any(|&i| self.chars[i].brev || self.chars[i].horn || self.chars[i].hat)
+        {
+            return false;
+        }
 
         let coda = &lcs[syl.coda_start..];
         if coda.iter().any(|&c| is_vowel_base(c)) {
@@ -310,6 +428,14 @@ impl WordBuffer {
             return false;
         }
         if !is_valid_vi_coda(coda) {
+            return false;
+        }
+        if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t'])
+            && self
+                .chars
+                .iter()
+                .any(|c| matches!(c.tone, Tone::Huyen | Tone::Hoi | Tone::Nga))
+        {
             return false;
         }
 
@@ -365,10 +491,10 @@ impl WordBuffer {
                 (VG::U, VG::E) | (VG::U, VG::Ehat) => {
                     matches!(coda, [] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['t'])
                 }
+                (VG::Uhorn, VG::O) => !has_coda,
                 (VG::U, VG::O)
                 | (VG::U, VG::Ohat)
                 | (VG::U, VG::Ohorn)
-                | (VG::Uhorn, VG::O)
                 | (VG::Uhorn, VG::Ohorn) => !matches!(coda, ['c', 'h'] | ['n', 'h']),
                 (VG::U, VG::Y) => {
                     matches!(coda, [] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['p'] | ['t'])
@@ -406,6 +532,29 @@ impl WordBuffer {
         }
     }
 
+    pub fn is_complete_vietnamese(&self) -> bool {
+        if !self.is_valid_vietnamese() {
+            return false;
+        }
+        let syl = self.analyze();
+        let groups: Vec<VG> = syl
+            .nucleus
+            .iter()
+            .filter_map(|&idx| {
+                let c = &self.chars[idx];
+                vowel_group(c.base_lc(), c.hat, c.brev, c.horn)
+            })
+            .collect();
+        let has_coda = syl.coda_start < self.chars.len();
+        if matches!(groups.as_slice(), [VG::Uhorn, VG::O]) {
+            return false;
+        }
+        if !has_coda && matches!(groups.as_slice(), [VG::Abrev] | [VG::O, VG::Abrev]) {
+            return false;
+        }
+        true
+    }
+
     pub fn restore_to_raw(&mut self, displayed_before_push: &str) -> EngineAction {
         let target = self.raw_string();
         self.chars = self
@@ -417,6 +566,24 @@ impl WordBuffer {
         self.leading_w_expansion = false;
         self.passthrough = true;
         diff_action(displayed_before_push, &target)
+    }
+
+    pub fn restore_to_raw_from(
+        &mut self,
+        displayed: &DisplayedSnapshot,
+        passthrough_key: Option<char>,
+    ) -> EngineAction {
+        let target = self.raw_string();
+        self.chars = self
+            .raw_keys
+            .iter()
+            .copied()
+            .map(ViChar::from_char)
+            .collect();
+        self.leading_w_expansion = false;
+        self.passthrough = true;
+        self.escaped_double_tone = false;
+        displayed.diff_to_str(&target, passthrough_key)
     }
 }
 
@@ -430,7 +597,14 @@ pub fn diff_action(displayed_before: &str, target: &str) -> EngineAction {
         }
     }
     let old_count = displayed_before.chars().count();
+    let target_count = target.chars().count();
     let n = (old_count - prefix_chars).min(u8::MAX as usize) as u8;
+    if n == 0 && target_count == old_count {
+        return EngineAction::Replace {
+            n: 0,
+            chars: String::new(),
+        };
+    }
     let suffix: String = target.chars().skip(prefix_chars).collect();
     EngineAction::Replace { n, chars: suffix }
 }
@@ -589,8 +763,7 @@ fn implicit_closing_hat(chars: &[ViChar], syl: &Syllable, idx: usize) -> bool {
 }
 
 pub fn set_tone_at(buf: &mut WordBuffer, idx: usize, tone: Tone) -> EngineAction {
-    // A syllable has one tone, even when a later vowel changes its target.
-    let start = buf.last_tone_idx().map_or(idx, |old| old.min(idx));
+    let displayed = DisplayedSnapshot::capture(buf);
     for i in 0..buf.chars.len() {
         if i != idx && buf.chars[i].tone != Tone::None {
             buf.clear_tone_and_implicit_hat_at(i);
@@ -599,11 +772,7 @@ pub fn set_tone_at(buf: &mut WordBuffer, idx: usize, tone: Tone) -> EngineAction
         }
     }
     buf.chars[idx].tone = tone;
-    let n = buf.len() - start;
-    EngineAction::Replace {
-        n: n as u8,
-        chars: buf.render_from(start),
-    }
+    displayed.diff_to_buf(buf, None)
 }
 
 /// Decide which nucleus index should carry a tone.

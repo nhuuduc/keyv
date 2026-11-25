@@ -1,5 +1,6 @@
 import Foundation
 import Carbon.HIToolbox
+import CoreGraphics
 import KeyVCore
 import KeyVHostKit
 import AppKit
@@ -43,6 +44,145 @@ private func check(_ got: String, _ want: String, _ label: String) {
     }
 }
 
+private func keyCodeForASCII(_ ch: Character) -> CGKeyCode {
+    switch ch.lowercased() {
+    case "a": return 0
+    case "s": return 1
+    case "d": return 2
+    case "f": return 3
+    case "h": return 4
+    case "g": return 5
+    case "z": return 6
+    case "x": return 7
+    case "c": return 8
+    case "v": return 9
+    case "b": return 11
+    case "q": return 12
+    case "w": return 13
+    case "e": return 14
+    case "r": return 15
+    case "y": return 16
+    case "t": return 17
+    case "1": return 18
+    case "2": return 19
+    case "3": return 20
+    case "4": return 21
+    case "6": return 22
+    case "5": return 23
+    case "9": return 25
+    case "7": return 26
+    case "8": return 28
+    case "0": return 29
+    case "o": return 31
+    case "u": return 32
+    case "i": return 34
+    case "p": return 35
+    case "l": return 37
+    case "j": return 38
+    case "k": return 40
+    case "n": return 45
+    case "m": return 46
+    case ".": return 47
+    case " ": return 49
+    default: return 0
+    }
+}
+
+private func makeHardwareKeyEvent(
+    _ ch: Character,
+    keyDown: Bool,
+    timestamp: UInt64,
+    autorepeat: Int64 = 0,
+    flags: CGEventFlags = []
+) -> CGEvent {
+    let src = CGEventSource(stateID: .hidSystemState)
+    let kc = keyCodeForASCII(ch)
+    let ev = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: keyDown)!
+    if !flags.isEmpty {
+        ev.flags.formUnion(flags)
+    }
+    ev.timestamp = timestamp
+    ev.setIntegerValueField(.keyboardEventAutorepeat, value: autorepeat)
+    let units = Array(String(ch).utf16)
+    ev.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+    return ev
+}
+
+private func simulateFastRolloverBurst(
+    _ input: String,
+    bundleID: String,
+    initialBuffer: String = "",
+    initialAutocompleteSuffix: String = "",
+    orthography: ViOrthography = .modern
+) -> (text: String, emitted: [EventInjector.EmittedEvent], leakedConsumedKeyUps: Int) {
+    let engine = ViEngine(method: .telex, orthography: orthography, allowWAsConsonant: true)
+    engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+    let injector = EventInjector(compatFixEnabled: true)
+    let tap = TapController(engine: engine, injector: injector)
+    tap.activeBundleID = bundleID
+    tap.activePID = 4242
+    tap.isSecureInputActive = false
+
+    var buffer = initialBuffer
+    var selectedSuffix = initialAutocompleteSuffix
+    var emitted: [EventInjector.EmittedEvent] = []
+
+    let applyDeleteBackward = {
+        if !selectedSuffix.isEmpty {
+            selectedSuffix = ""
+        } else if !buffer.isEmpty {
+            buffer.removeLast()
+        }
+    }
+    let applyInsert = { (str: String) in
+        selectedSuffix = ""
+        buffer += str
+    }
+
+    injector.eventSink = { item in
+        emitted.append(item)
+        switch item {
+        case .virtualKey(let kc, let keyDown, _, _):
+            if keyDown && kc == 51 {
+                applyDeleteBackward()
+            }
+        case .unicode(let units, let keyDown, _, _):
+            if keyDown {
+                applyInsert(String(decoding: units, as: UTF16.self))
+            }
+        }
+    }
+
+    var ts: UInt64 = 1_000_000_000
+    var pendingKeyUps: [(Character, Bool)] = []
+    var leakedConsumedKeyUps = 0
+
+    for (idx, ch) in input.enumerated() {
+        ts += 5_000_000
+        let down = makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)
+        let passed = tap.processEventForTesting(type: .keyDown, event: down)
+        let wasConsumed = (passed == nil)
+        if let passed {
+            applyInsert(passed.keyboardString())
+        }
+        pendingKeyUps.append((ch, wasConsumed))
+
+        if pendingKeyUps.count >= 3 || idx == input.count - 1 {
+            while !pendingKeyUps.isEmpty {
+                let (upCh, consumed) = pendingKeyUps.removeFirst()
+                ts += 1_000_000
+                let up = makeHardwareKeyEvent(upCh, keyDown: false, timestamp: ts)
+                let passedUp = tap.processEventForTesting(type: .keyUp, event: up)
+                if consumed && passedUp != nil {
+                    leakedConsumedKeyUps += 1
+                }
+            }
+        }
+    }
+
+    return (buffer + selectedSuffix, emitted, leakedConsumedKeyUps)
+}
+
 // Telex basics
 check(screen("ddawng", method: .telex), "đăng", "telex ddawng")
 check(screen("dduowngf", method: .telex), "đường", "single-w uow compound")
@@ -66,6 +206,16 @@ check(
     "Mình đang code Swift trên macos với terminal và github",
     "mixed Vietnamese + English with spellCheck"
 )
+
+// Real-world fast Vietnamese + English cases
+check(screen("hayx", method: .telex, orthography: .modern, spellCheck: true), "hãy", "fast hayx modern")
+check(screen("haxy", method: .telex, orthography: .modern, spellCheck: true), "hãy", "fast haxy modern")
+check(screen("tesst", method: .telex, spellCheck: true), "test", "tesst escape to test")
+check(screen("tests", method: .telex, spellCheck: true), "tests", "tests restores English")
+check(screen("tester", method: .telex, spellCheck: true), "tester", "tester restores English")
+check(screen("testing", method: .telex, spellCheck: true), "testing", "testing restores English")
+check(screen("next text west web wifi work world w", method: .telex, spellCheck: true), "next text west web wifi work world w", "English + w words")
+check(screen("raw saw law rawng sawts ", method: .telex, spellCheck: true), "raw saw law răng sắt ", "open breve English vs closed breve Vietnamese")
 
 // Orthography: traditional tone on first vowel (òa), modern on second (oà)
 check(screen("hoaf", method: .telex, orthography: .traditional), "h\u{00F2}a", "ortho traditional")
@@ -133,6 +283,111 @@ check(screen("aaa eee ooo ddd aww oww uww", method: .telex), "aa ee oo dd aw ow 
 check(screen("toanfs", method: .telex), "toán", "closed oa tone placement")
 check(screen("e11", method: .vni), "e1", "VNI repeated tone escape")
 
+// Fast-typing TapController + EventInjector rollover & race regression suite
+do {
+    let orcaHayx = simulateFastRolloverBurst("hayx", bundleID: "com.stablyai.orca")
+    check(orcaHayx.text, "hãy", "TapController fast rollover hayx in Electron/Orca")
+    check(String(orcaHayx.leakedConsumedKeyUps), "0", "TapController swallows consumed keyUp in hayx")
+    let unicodeEventsHayx = orcaHayx.emitted.compactMap { ev -> [UniChar]? in
+        if case .unicode(let units, true, _, _) = ev { return units }
+        return nil
+    }
+    check(String(unicodeEventsHayx.count), "2", "EventInjector emits 1 Character per CGEvent for ãy")
+    let preserved20000000 = orcaHayx.emitted.allSatisfy { ev in
+        switch ev {
+        case .virtualKey(_, _, let flags, _), .unicode(_, _, let flags, _):
+            return (flags & 0x2000_0000) != 0
+        }
+    }
+    check(preserved20000000 ? "ok" : "wiped", "ok", "EventInjector preserves 0x20000000 CGEvent flag")
+
+    var monotonicOK = true
+    var prevTS: UInt64 = 0
+    for ev in orcaHayx.emitted {
+        let ts: UInt64 = switch ev {
+        case .virtualKey(_, _, _, let t), .unicode(_, _, _, let t): t
+        }
+        if ts <= prevTS { monotonicOK = false }
+        prevTS = ts
+    }
+    check(monotonicOK ? "ok" : "bad", "ok", "EventInjector stamps strictly monotonic timestamps")
+
+    let orcaHaxy = simulateFastRolloverBurst("haxy", bundleID: "com.stablyai.orca")
+    check(orcaHaxy.text, "hãy", "TapController fast rollover haxy serializes trailing y")
+    check(String(orcaHaxy.leakedConsumedKeyUps), "0", "TapController swallows consumed keyUp in haxy")
+    let unicodeEventsHaxy = orcaHaxy.emitted.compactMap { ev -> String? in
+        if case .unicode(let units, true, _, _) = ev { return String(decoding: units, as: UTF16.self) }
+        return nil
+    }
+    check(unicodeEventsHaxy.joined(separator: "|"), "ã|y", "TapController serializes post-replace Pass y after ã")
+
+    let chromePlain = simulateFastRolloverBurst("hayx gox tieengs Vieetj nhanh", bundleID: "com.google.Chrome")
+    check(chromePlain.text, "hãy gõ tiếng Việt nhanh", "Browser compat U+202F burst with no selection")
+
+    do {
+        let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)
+        engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+        let injector = EventInjector(compatFixEnabled: true)
+        let tap = TapController(engine: engine, injector: injector)
+        tap.activeBundleID = "com.google.Chrome"
+        tap.isSecureInputActive = false
+
+        var omniboxBuf = ""
+        var omniboxAuto = ""
+        injector.eventSink = { item in
+            switch item {
+            case .virtualKey(51, true, _, _):
+                if !omniboxAuto.isEmpty { omniboxAuto = "" }
+                else if !omniboxBuf.isEmpty { omniboxBuf.removeLast() }
+            case .unicode(let u, true, _, _):
+                omniboxAuto = ""
+                omniboxBuf += String(decoding: u, as: UTF16.self)
+            default:
+                break
+            }
+        }
+        for ch in "hay" {
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: 1_000)) {
+                omniboxBuf += p.keyboardString()
+            }
+        }
+        omniboxAuto = "stack.com"
+        _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("x", keyDown: true, timestamp: 2_000))
+        check(omniboxBuf + omniboxAuto, "hãy", "Browser omnibox active autocomplete selection replaced cleanly via U+202F")
+    }
+
+    let ghosttyBurst = simulateFastRolloverBurst("hayx dduowcj tests w", bundleID: "com.mitchellh.ghostty")
+    check(ghosttyBurst.text, "hãy được tests w", "Terminal bundle ID skips autocomplete spacer")
+    let hasSpacerInTerminal = ghosttyBurst.emitted.contains { ev in
+        if case .unicode(let u, true, _, _) = ev {
+            return u == [0x202F] || u == [0x200C]
+        }
+        return false
+    }
+    check(hasSpacerInTerminal ? "bad" : "ok", "ok", "Terminal never receives U+202F or U+200C")
+
+    do {
+        let engine = ViEngine(method: .telex, orthography: .traditional, allowWAsConsonant: true)
+        engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+        let injector = EventInjector(compatFixEnabled: false)
+        var injectedCount = 0
+        injector.eventSink = { _ in injectedCount += 1 }
+        let tap = TapController(engine: engine, injector: injector)
+        tap.isSecureInputActive = false
+
+        _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("a", keyDown: true, timestamp: 100))
+        let repeatEv = makeHardwareKeyEvent("a", keyDown: true, timestamp: 200, autorepeat: 1)
+        let repeatOut = tap.processEventForTesting(type: .keyDown, event: repeatEv)
+        check(repeatOut != nil && injectedCount == 0 ? "ok" : "bad", "ok", "Autorepeat passes through without triggering aa->â")
+
+        _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("t", keyDown: true, timestamp: 300))
+        _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("a", keyDown: true, timestamp: 400))
+        let fnF = makeHardwareKeyEvent("f", keyDown: true, timestamp: 500, flags: .maskSecondaryFn)
+        let fnOut = tap.processEventForTesting(type: .keyDown, event: fnF)
+        check(fnOut != nil && injectedCount == 0 ? "ok" : "bad", "ok", "Fn+F system shortcut passes through without applying huyền tone")
+    }
+}
+
 do {
     let v020 = SemVer(parsing: "0.2.0")
     let v030 = SemVer(parsing: "v0.3.0")
@@ -144,16 +399,16 @@ do {
     }
     let sums = """
     # SHA-256 checksums
-    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  KeyV-0.3.0-macos-universal.zip
-    fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *KeyV-0.3.0-macos-universal.dmg
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  KeyV-0.3.1-macos-universal.zip
+    fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *KeyV-0.3.1-macos-universal.dmg
     """
     check(
-        UpdateVerification.parseSHA256Sums(sums, assetName: "KeyV-0.3.0-macos-universal.zip") ?? "",
+        UpdateVerification.parseSHA256Sums(sums, assetName: "KeyV-0.3.1-macos-universal.zip") ?? "",
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "SHA256SUMS zip lookup"
     )
     check(
-        UpdateVerification.parseSHA256Sums(sums, assetName: "KeyV-0.3.0-macos-universal.dmg") ?? "",
+        UpdateVerification.parseSHA256Sums(sums, assetName: "KeyV-0.3.1-macos-universal.dmg") ?? "",
         "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
         "SHA256SUMS dmg lookup"
     )
@@ -170,9 +425,31 @@ MainActor.assumeIsolated {
         defaults.removePersistentDomain(forName: domain)
         if let previous { defaults.setPersistentDomain(previous, forName: domain) }
     }
+
+    let migrationSuiteName = "app.keyv.smoke.migration.\(ProcessInfo.processInfo.processIdentifier)"
+    if let migrationStore = UserDefaults(suiteName: migrationSuiteName) {
+        migrationStore.removePersistentDomain(forName: migrationSuiteName)
+        migrationStore.set(false, forKey: "allowWAsConsonant")
+        migrationStore.set(false, forKey: "repeatedRestore")
+        migrationStore.set(false, forKey: "spellCheck")
+        AppSettings.shared.migrateLegacyDefaultsIfNeeded(in: migrationStore)
+        check(
+            migrationStore.bool(forKey: "allowWAsConsonant")
+                && migrationStore.bool(forKey: "repeatedRestore")
+                && migrationStore.bool(forKey: "spellCheck")
+                && migrationStore.integer(forKey: "settingsSchemaVersion") == AppSettings.currentSchemaVersion
+                ? "ok" : "bad",
+            "ok",
+            "Legacy schema v0 settings migrate broken false flags to true"
+        )
+        migrationStore.removePersistentDomain(forName: migrationSuiteName)
+    }
+
     let model = SettingsModel()
     check(String(model.method.rawValue), "1", "fresh install defaults to Telex")
     check(model.spellCheck ? "true" : "false", "true", "fresh install enables spellCheck")
+    check(model.allowWAsConsonant ? "true" : "false", "true", "fresh install enables allowWAsConsonant")
+    check(model.repeatedRestore ? "true" : "false", "true", "fresh install enables repeatedRestore")
     check(model.ctrlShiftSwitch ? "true" : "false", "true", "fresh install enables Ctrl+Shift switch")
     check(model.autoCheckUpdates ? "true" : "false", "true", "fresh install enables autoCheckUpdates")
     model.method = .vni
@@ -212,7 +489,7 @@ MainActor.assumeIsolated {
     picker.entries = [
         ClipboardEntry(id: 1, kind: .text, createdAt: Date(), sourceBundleID: "com.apple.TextEdit", text: "Xin chào KeyV trên macOS"),
         ClipboardEntry(id: 2, kind: .fileURL, createdAt: Date(), sourceBundleID: "com.apple.Finder", fileURL: URL(fileURLWithPath: "/tmp/bao-cao-tai-chinh.pdf")),
-        ClipboardEntry(id: 3, kind: .text, createdAt: Date(), sourceBundleID: "com.tinyspeck.slackmacgap", text: "Release notes v0.3.0"),
+        ClipboardEntry(id: 3, kind: .text, createdAt: Date(), sourceBundleID: "com.tinyspeck.slackmacgap", text: "Release notes v0.3.1"),
     ]
     picker.selectionIndex = 2
     picker.searchQuery = "bao-cao"
@@ -224,7 +501,7 @@ MainActor.assumeIsolated {
 }
 
 if failures.isEmpty {
-    print("KeyVSmoke: ALL PASS (engine + UniKey parity + updater + host settings & UI regressions)")
+    print("KeyVSmoke: ALL PASS (engine + fast-typing rollover + UniKey parity + updater + host settings & UI regressions)")
 } else {
     for f in failures { print("FAIL: \(f)") }
     exit(1)

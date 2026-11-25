@@ -35,6 +35,9 @@ final class KeyVInputController: IMKInputController {
             return false
         case .replace(let backspaces, let chars):
             guard let textClient = client as? IMKTextInput else { return false }
+            if backspaces == 0 && chars.isEmpty {
+                return true
+            }
             // Feed replacement through the marked-text composition pipeline.
             if backspaces > 0 {
                 textClient.setMarkedText(String(repeating: "\u{0008}", count: backspaces),

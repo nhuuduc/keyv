@@ -48,6 +48,9 @@ enum {
     KEYV_OPT_SPELL_CHECK = 1 << 2,      /* kiểm tra chính tả & khôi phục từ tiếng Anh */
 };
 void keyv_typer_set_options(KeyVTyper *typer, int32_t flags);
+void keyv_typer_set_allow_w_consonant(KeyVTyper *typer, int32_t allow_w_consonant);
+void keyv_typer_set_macro_enabled(KeyVTyper *typer, int32_t macro_enabled);
+int32_t keyv_typer_has_active_transform(const KeyVTyper *typer);
 /* Returns 0 on success, -1 on error (null args / invalid UTF-8). */
 int32_t keyv_typer_set_macro(KeyVTyper *typer, const char *key, const char *value);
 

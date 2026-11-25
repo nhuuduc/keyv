@@ -6,7 +6,7 @@
 
 use crate::config::{Config, InputMethod};
 use crate::macro_::MacroTable;
-use crate::word::WordBuffer;
+use crate::word::{DisplayedSnapshot, WordBuffer};
 use crate::{telex, vni};
 
 /// Maximum tracked chars per word session (safety bound).
@@ -30,6 +30,8 @@ pub struct Typer {
     buf: WordBuffer,
     /// Next letter starts a sentence (after . ! ? newline).
     sentence_start: bool,
+    macro_eligible: bool,
+    auto_capitalized_first: bool,
 }
 
 impl Typer {
@@ -39,6 +41,8 @@ impl Typer {
             macros,
             buf: WordBuffer::default(),
             sentence_start: true,
+            macro_eligible: true,
+            auto_capitalized_first: false,
         }
     }
 
@@ -65,16 +69,29 @@ impl Typer {
     /// Clear session state (focus change, mouse click, app switch…).
     pub fn reset(&mut self) {
         self.buf.clear();
+        self.macro_eligible = true;
+        self.auto_capitalized_first = false;
     }
 
     /// Synchronize session state when the user presses Backspace.
     pub fn backspace(&mut self) {
         self.buf.pop_backspace();
+        if self.buf.is_empty() {
+            self.macro_eligible = true;
+            if self.auto_capitalized_first {
+                self.sentence_start = true;
+                self.auto_capitalized_first = false;
+            }
+        }
     }
 
     /// Current tracked word, rendered — useful for overlay/debug UI.
     pub fn current_word(&self) -> String {
         self.buf.render_all()
+    }
+
+    pub fn has_active_transform(&self) -> bool {
+        !self.buf.is_empty() && self.buf.has_any_transform()
     }
 
     /// Feed one character key. Non-alphabetic input passes through and
@@ -85,11 +102,17 @@ impl Typer {
             return EngineAction::Pass;
         }
 
-        let lc = ch.to_lowercase().next().unwrap_or(ch);
-        if !lc.is_ascii() {
+        if matches!(ch, '\u{0008}' | '\u{007f}') {
+            self.backspace();
+            return EngineAction::Pass;
+        }
+
+        if !ch.is_ascii() {
             self.reset();
             return EngineAction::Pass;
         }
+
+        let lc = ch.to_ascii_lowercase();
 
         // Sentence terminators arm the next-letter capitalization; spaces
         // keep it armed (". hello" → ". Hello"), other separators disarm.
@@ -113,11 +136,16 @@ impl Typer {
                 self.sentence_start = false;
                 effective_ch = ch.to_uppercase().next().unwrap_or(ch);
                 capitalized_first = true;
+                self.auto_capitalized_first = true;
             } else if self.cfg.auto_capitalize && self.sentence_start {
                 self.sentence_start = false;
             }
 
-            if self.cfg.macro_enabled && !self.macros.is_empty() {
+            if self.cfg.macro_enabled
+                && self.macro_eligible
+                && !self.buf.passthrough
+                && !self.macros.is_empty()
+            {
                 let mut raw_cand: String = self
                     .buf
                     .raw_keys
@@ -126,20 +154,26 @@ impl Typer {
                     .collect();
                 raw_cand.push(lc);
                 if let Some(value) = self.macros.exact(&raw_cand).cloned() {
-                    let all_upper = self.buf.raw_keys.len() + 1 >= 2
+                    let first_auto = self.auto_capitalized_first;
+                    let all_upper = !first_auto
+                        && self.buf.raw_keys.len() + 1 >= 2
                         && self.buf.raw_keys.iter().all(|c| c.is_uppercase())
                         && ch.is_uppercase();
                     let expanded = if all_upper {
                         value.to_uppercase()
+                    } else if first_auto {
+                        capitalize_first_char(&value)
                     } else {
                         value
                     };
-                    let n = self.buf.len().min(u8::MAX as usize) as u8;
+                    let displayed = DisplayedSnapshot::capture(&self.buf);
                     self.buf.clear();
-                    return EngineAction::Replace { n, chars: expanded };
+                    self.auto_capitalized_first = false;
+                    return displayed.diff_to_str(&expanded, Some(ch));
                 }
             }
 
+            let was_non_empty = !self.buf.is_empty();
             let action = match self.cfg.method {
                 InputMethod::Telex | InputMethod::SimpleTelex => {
                     telex::step(&mut self.buf, &self.cfg, effective_ch)
@@ -147,6 +181,11 @@ impl Typer {
                 InputMethod::Vni => vni::step(&mut self.buf, &self.cfg, effective_ch),
                 InputMethod::Off => engine_pass(),
             };
+
+            if was_non_empty && self.buf.is_empty() {
+                self.macro_eligible = false;
+                self.auto_capitalized_first = false;
+            }
 
             if capitalized_first && matches!(action, EngineAction::Pass) {
                 return EngineAction::Replace {
@@ -159,13 +198,65 @@ impl Typer {
 
         // VNI digit modifiers operate on the live word session.
         if lc.is_ascii_digit() && matches!(self.cfg.method, InputMethod::Vni) {
-            return vni::step(&mut self.buf, &self.cfg, ch);
+            let was_non_empty = !self.buf.is_empty();
+            let action = vni::step(&mut self.buf, &self.cfg, ch);
+            if was_non_empty && self.buf.is_empty() {
+                self.macro_eligible = false;
+                self.auto_capitalized_first = false;
+            }
+            return action;
         }
 
-        // Digits/punctuation close the session and pass through.
+        if lc.is_ascii_digit() || ch == '_' {
+            self.macro_eligible = false;
+            self.auto_capitalized_first = false;
+            if self.cfg.spell_check {
+                let displayed = DisplayedSnapshot::capture(&self.buf);
+                self.buf.record_raw(ch);
+                if self.buf.has_any_transform() {
+                    return self.buf.restore_to_raw_from(&displayed, Some(ch));
+                }
+                if self.buf.len() < MAX_WORD_LEN {
+                    self.buf.push(ch);
+                } else {
+                    self.buf.overflow_count += 1;
+                }
+                self.buf.passthrough = true;
+                return EngineAction::Pass;
+            }
+            self.buf.clear();
+            return EngineAction::Pass;
+        }
+
+        let had_word = !self.buf.is_empty();
+        if self.cfg.spell_check
+            && !self.buf.passthrough
+            && self.buf.has_any_transform()
+            && !self.buf.is_complete_vietnamese()
+        {
+            let displayed = DisplayedSnapshot::capture(&self.buf);
+            let target = format!("{}{ch}", self.buf.raw_string());
+            self.buf.clear();
+            self.macro_eligible = ch != '\'' || !had_word;
+            self.auto_capitalized_first = false;
+            return displayed.diff_to_str(&target, Some(ch));
+        }
+
         self.buf.clear();
+        self.macro_eligible = ch != '\'' || !had_word;
+        self.auto_capitalized_first = false;
         EngineAction::Pass
     }
+}
+
+fn capitalize_first_char(s: &str) -> String {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out: String = first.to_uppercase().collect();
+    out.extend(chars);
+    out
 }
 
 #[inline]

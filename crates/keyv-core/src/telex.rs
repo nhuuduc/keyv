@@ -12,10 +12,10 @@
 
 use crate::config::{Config, InputMethod};
 use crate::engine::{EngineAction, MAX_WORD_LEN};
-use crate::tables::{Tone, is_valid_vi_initial};
+use crate::tables::{Tone, is_valid_vi_initial, is_vowel_base};
 use crate::word::{
-    ViChar, WordBuffer, apply_tone, apply_uo_or_single_horn, diff_action, reanchor_existing_tone,
-    rebalance_after_push,
+    DisplayedSnapshot, ViChar, WordBuffer, apply_tone, apply_uo_or_single_horn,
+    reanchor_existing_tone, rebalance_after_push,
 };
 
 pub fn tone_of_key(lc: char) -> Option<Tone> {
@@ -32,21 +32,27 @@ pub fn tone_of_key(lc: char) -> Option<Tone> {
 /// Process one alphabetic key in a Telex-family mode.
 pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
     if buf.len() >= MAX_WORD_LEN {
-        buf.clear();
-    }
-    let displayed_before = if cfg.spell_check {
-        buf.render_all()
-    } else {
-        String::new()
-    };
-    buf.record_raw(ch);
-
-    if buf.passthrough {
-        buf.push(ch);
+        buf.passthrough = true;
+        buf.overflow_count += 1;
         return EngineAction::Pass;
     }
 
+    let displayed = DisplayedSnapshot::capture(buf);
+    buf.record_raw(ch);
     let lc = ch.to_lowercase().next().unwrap_or(ch);
+
+    if buf.passthrough {
+        if buf.escaped_double_tone {
+            buf.escaped_double_tone = false;
+            if is_vowel_base(lc) {
+                return buf.restore_to_raw_from(&displayed, Some(ch));
+            }
+            buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
+            buf.raw_keys.push(ch);
+        }
+        buf.push(ch);
+        return EngineAction::Pass;
+    }
 
     // Repeating a transformation key restores literal typing (aaa -> aa,
     // ddd -> dd). Preserve the original character's case and tone.
@@ -55,15 +61,15 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
     {
         if lc == 'd' && last.stroke {
             buf.last_mut().unwrap().stroke = false;
-            let chars = format!("{}{ch}", buf.render_last());
+            let target = format!("{}{ch}", buf.render_all());
             finish_escape(buf, cfg, ch);
-            return EngineAction::Replace { n: 1, chars };
+            return displayed.diff_to_str(&target, Some(ch));
         }
         if matches!(lc, 'a' | 'e' | 'o') && last.base_lc() == lc && last.hat && !last.implicit_hat {
             buf.last_mut().unwrap().hat = false;
-            let chars = format!("{}{ch}", buf.render_last());
+            let target = format!("{}{ch}", buf.render_all());
             finish_escape(buf, cfg, ch);
-            return EngineAction::Replace { n: 1, chars };
+            return displayed.diff_to_str(&target, Some(ch));
         }
     }
 
@@ -74,29 +80,24 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         && matches!(cfg.method, InputMethod::Telex)
     {
         buf.chars[0].stroke = false;
-        let n = buf.len() as u8;
-        let chars = format!("{}{ch}", buf.render_from(0));
+        let target = format!("{}{ch}", buf.render_all());
         finish_escape(buf, cfg, ch);
-        return EngineAction::Replace { n, chars };
+        return displayed.diff_to_str(&target, Some(ch));
     }
 
     // `dd` → đ
     if lc == 'd' && buf.last_is_plain_d() {
         buf.set_last_stroke();
         if cfg.spell_check && !buf.is_valid_vietnamese() {
-            return if cfg.repeated_restore {
-                buf.restore_to_raw(&displayed_before)
-            } else {
-                buf.last_mut().unwrap().stroke = false;
-                buf.push(ch);
-                buf.passthrough = true;
-                EngineAction::Pass
-            };
+            buf.last_mut().unwrap().stroke = false;
+            buf.push(ch);
+            if buf.has_any_transform() {
+                return buf.restore_to_raw_from(&displayed, Some(ch));
+            }
+            buf.passthrough = true;
+            return displayed.diff_to_buf(buf, Some(ch));
         }
-        return EngineAction::Replace {
-            n: 1,
-            chars: buf.render_last(),
-        };
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     if lc == 'd'
@@ -109,92 +110,93 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         && buf.is_valid_vietnamese()
     {
         buf.chars[0].stroke = true;
-        let n = buf.len() as u8;
-        return EngineAction::Replace {
-            n,
-            chars: buf.render_from(0),
-        };
+        if cfg.spell_check && !buf.is_valid_vietnamese() {
+            buf.chars[0].stroke = false;
+            return push_and_check_spell(buf, cfg, ch, &displayed);
+        }
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     // tone keys — tone finalization does NOT close the session (Unikey-style:
     // words are separated by real separators; host resets on separators).
     if let Some(tone) = tone_of_key(lc) {
-        if cfg.repeated_restore
-            && let Some(idx) = buf.last_with_tone(tone)
-        {
-            buf.clear_tone_and_implicit_hat_at(idx);
-            let tail = buf.render_from(idx);
-            let n = buf.len() - idx;
-            finish_escape(buf, cfg, ch);
-            return EngineAction::Replace {
-                n: n as u8,
-                chars: format!("{tail}{ch}"),
-            };
+        if let Some(idx) = buf.last_with_tone(tone) {
+            let prev_raw_lc = buf
+                .raw_keys
+                .len()
+                .checked_sub(2)
+                .and_then(|i| buf.raw_keys[i].to_lowercase().next());
+            if prev_raw_lc != Some(lc)
+                && !buf.has_explicit_mark()
+                && (cfg.repeated_restore || cfg.spell_check)
+            {
+                return buf.restore_to_raw_from(&displayed, Some(ch));
+            }
+            if cfg.repeated_restore {
+                let had_explicit_mark = buf.has_explicit_mark();
+                buf.clear_tone_and_implicit_hat_at(idx);
+                let target = format!("{}{ch}", buf.render_all());
+                if cfg.spell_check && !had_explicit_mark {
+                    buf.chars = target.chars().map(ViChar::from_char).collect();
+                    buf.leading_w_expansion = false;
+                    buf.passthrough = true;
+                    buf.escaped_double_tone = true;
+                } else {
+                    finish_escape(buf, cfg, ch);
+                }
+                return displayed.diff_to_str(&target, Some(ch));
+            }
         }
         if cfg.spell_check && !buf.is_valid_vietnamese() {
-            return push_and_check_spell(buf, cfg, ch, &displayed_before);
+            return push_and_check_spell(buf, cfg, ch, &displayed);
         }
-        return apply_tone(buf, tone, cfg.orthography, ch);
+        let _ = apply_tone(buf, tone, cfg.orthography, ch);
+        if cfg.spell_check && !buf.is_valid_vietnamese() {
+            if buf.has_any_transform() {
+                return buf.restore_to_raw_from(&displayed, Some(ch));
+            }
+            buf.passthrough = true;
+        }
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     match lc {
         // duplicate vowel → circumflex (adjacent or delayed in valid Vietnamese syllable)
         'a' | 'e' | 'o' => {
             if buf.last_is_dup_circ_candidate(lc) {
-                let was_implicit = buf.last().is_some_and(|c| c.implicit_hat);
                 buf.set_last_hat();
-                let tone_shift = reanchor_existing_tone(buf, cfg.orthography);
+                let _ = reanchor_existing_tone(buf, cfg.orthography);
                 if cfg.spell_check && !buf.is_valid_vietnamese() {
-                    return if cfg.repeated_restore {
-                        buf.restore_to_raw(&displayed_before)
-                    } else {
-                        buf.passthrough = true;
-                        buf.restore_to_raw(&displayed_before)
-                    };
+                    return buf.restore_to_raw_from(&displayed, Some(ch));
                 }
-                let last_idx = buf.len() - 1;
-                let start = tone_shift.map_or(last_idx, |s| s.min(last_idx));
-                if was_implicit && start == last_idx {
-                    return EngineAction::Replace {
-                        n: 0,
-                        chars: String::new(),
-                    };
-                }
-                return EngineAction::Replace {
-                    n: (buf.len() - start) as u8,
-                    chars: buf.render_from(start),
-                };
+                return displayed.diff_to_buf(buf, Some(ch));
             }
-            if let Some(action) = try_delayed_circumflex(buf, cfg, ch, lc) {
+            if let Some(action) = try_delayed_circumflex(buf, cfg, ch, lc, &displayed) {
                 return action;
             }
-            push_and_check_spell(buf, cfg, ch, &displayed_before)
+            push_and_check_spell(buf, cfg, ch, &displayed)
         }
-        'w' => apply_w(buf, cfg, ch, &displayed_before),
+        'w' => apply_w(buf, cfg, ch, &displayed),
         // `z` removes the last tone from the syllable (Unikey telex).
         'z' => {
             if let Some(idx) = buf.last_tone_idx() {
                 buf.clear_tone_and_implicit_hat_at(idx);
-                let n = buf.len() - idx;
-                return EngineAction::Replace {
-                    n: n as u8,
-                    chars: buf.render_from(idx),
-                };
+                return displayed.diff_to_buf(buf, Some(ch));
             }
-            push_and_check_spell(buf, cfg, ch, &displayed_before)
+            push_and_check_spell(buf, cfg, ch, &displayed)
         }
-        _ => push_and_check_spell(buf, cfg, ch, &displayed_before),
+        _ => push_and_check_spell(buf, cfg, ch, &displayed),
     }
 }
 
 fn finish_escape(buf: &mut WordBuffer, cfg: &Config, last_ch: char) {
     if cfg.spell_check {
-        buf.raw_keys.pop();
         let current = format!("{}{last_ch}", buf.render_all());
         buf.raw_keys = current.chars().collect();
         buf.chars = current.chars().map(ViChar::from_char).collect();
         buf.leading_w_expansion = false;
         buf.passthrough = true;
+        buf.escaped_double_tone = false;
     } else {
         buf.clear();
     }
@@ -204,17 +206,18 @@ fn push_and_check_spell(
     buf: &mut WordBuffer,
     cfg: &Config,
     ch: char,
-    displayed_before: &str,
+    displayed: &DisplayedSnapshot,
 ) -> EngineAction {
     buf.push(ch);
     if cfg.spell_check && !buf.is_valid_vietnamese() {
-        if cfg.repeated_restore && buf.has_any_transform() {
-            return buf.restore_to_raw(displayed_before);
+        if buf.has_any_transform() {
+            return buf.restore_to_raw_from(displayed, Some(ch));
         }
         buf.passthrough = true;
-        return EngineAction::Pass;
+        return displayed.diff_to_buf(buf, Some(ch));
     }
-    rebalance_after_push(buf, cfg.orthography)
+    let _ = rebalance_after_push(buf, cfg.orthography);
+    displayed.diff_to_buf(buf, Some(ch))
 }
 
 fn try_delayed_circumflex(
@@ -222,6 +225,7 @@ fn try_delayed_circumflex(
     cfg: &Config,
     ch: char,
     lc: char,
+    displayed: &DisplayedSnapshot,
 ) -> Option<EngineAction> {
     if !matches!(cfg.method, InputMethod::Telex) || buf.len() < 2 {
         return None;
@@ -231,25 +235,22 @@ fn try_delayed_circumflex(
         return None;
     }
 
-    if cfg.repeated_restore
-        && let Some(&hat_idx) = syl
-            .nucleus
-            .iter()
-            .rev()
-            .find(|&&i| buf.chars[i].base_lc() == lc && buf.chars[i].hat)
+    if let Some(&hat_idx) = syl
+        .nucleus
+        .iter()
+        .rev()
+        .find(|&&i| buf.chars[i].base_lc() == lc && buf.chars[i].hat)
     {
         if buf.chars[hat_idx].implicit_hat {
             buf.chars[hat_idx].implicit_hat = false;
-            return Some(EngineAction::Replace {
-                n: 0,
-                chars: String::new(),
-            });
+            return Some(displayed.diff_to_buf(buf, Some(ch)));
         }
-        buf.chars[hat_idx].hat = false;
-        let n = (buf.len() - hat_idx) as u8;
-        let chars = format!("{}{ch}", buf.render_from(hat_idx));
-        finish_escape(buf, cfg, ch);
-        return Some(EngineAction::Replace { n, chars });
+        if cfg.repeated_restore {
+            buf.chars[hat_idx].hat = false;
+            let target = format!("{}{ch}", buf.render_all());
+            finish_escape(buf, cfg, ch);
+            return Some(displayed.diff_to_str(&target, Some(ch)));
+        }
     }
 
     if lc == 'o' && syl.coda_start == buf.len() && syl.nucleus.len() == 2 {
@@ -273,7 +274,13 @@ fn try_delayed_circumflex(
     if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t']) && buf.last_tone_idx().is_none() {
         return None;
     }
-    if syl.nucleus.len() == 1 && coda.len() == 1 && !buf.has_any_transform() {
+    let prev_raw_lc = buf
+        .raw_keys
+        .len()
+        .checked_sub(2)
+        .and_then(|i| buf.raw_keys[i].to_lowercase().next());
+    let tone_just_typed = prev_raw_lc.and_then(tone_of_key).is_some();
+    if syl.nucleus.len() == 1 && coda.len() == 1 && !buf.has_explicit_mark() && !tone_just_typed {
         return None;
     }
 
@@ -294,20 +301,23 @@ fn try_delayed_circumflex(
 
     buf.chars[cand_idx].hat = true;
     buf.chars[cand_idx].implicit_hat = false;
-    let tone_shift = reanchor_existing_tone(buf, cfg.orthography);
-    let start = tone_shift.map_or(cand_idx, |s| s.min(cand_idx));
-    Some(EngineAction::Replace {
-        n: (buf.len() - start) as u8,
-        chars: buf.render_from(start),
-    })
+    let _ = reanchor_existing_tone(buf, cfg.orthography);
+    Some(displayed.diff_to_buf(buf, Some(ch)))
 }
 
-fn apply_w(buf: &mut WordBuffer, cfg: &Config, ch: char, displayed_before: &str) -> EngineAction {
+fn apply_w(
+    buf: &mut WordBuffer,
+    cfg: &Config,
+    ch: char,
+    displayed: &DisplayedSnapshot,
+) -> EngineAction {
     let allow_shorthand_u = !cfg.allow_w_consonant && matches!(cfg.method, InputMethod::Telex);
 
     if buf.is_empty() {
         if !allow_shorthand_u {
-            return push_and_check_spell(buf, cfg, ch, displayed_before);
+            buf.push(ch);
+            buf.passthrough = true;
+            return EngineAction::Pass;
         }
         buf.push(ch);
         if let Some(c) = buf.last_mut() {
@@ -315,45 +325,42 @@ fn apply_w(buf: &mut WordBuffer, cfg: &Config, ch: char, displayed_before: &str)
             c.horn = true;
         }
         buf.leading_w_expansion = true;
-        let glyph = if ch.is_uppercase() { "Ư" } else { "ư" };
-        return EngineAction::Replace {
-            n: 0,
-            chars: glyph.to_string(),
-        };
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     let last = buf.last().copied().expect("non-empty checked");
     if cfg.repeated_restore && (last.horn || last.brev) {
-        let chars = if buf.len() == 1 && buf.leading_w_expansion {
-            if last.is_upper() {
-                "W".to_string()
+        if buf.len() == 1 && buf.leading_w_expansion {
+            let w_ch = if last.is_upper() { 'W' } else { 'w' };
+            let target = w_ch.to_string();
+            if cfg.spell_check {
+                buf.chars = vec![ViChar::from_char(w_ch)];
+                buf.raw_keys = vec![w_ch];
+                buf.leading_w_expansion = false;
+                buf.passthrough = true;
             } else {
-                "w".to_string()
+                buf.clear();
             }
-        } else {
-            let mut start = buf.len() - 1;
-            let prev_idx = buf.len().saturating_sub(2);
-            if last.base_lc() == 'o'
-                && last.horn
-                && buf.len() >= 2
-                && buf.chars[prev_idx].base_lc() == 'u'
-                && buf.chars[prev_idx].horn
-            {
-                buf.chars[prev_idx].horn = false;
-                buf.chars[prev_idx].implicit_horn = false;
-                start = prev_idx;
-            }
-            let c = buf.last_mut().unwrap();
-            c.horn = false;
-            c.implicit_horn = false;
-            c.brev = false;
-            let n = (buf.len() - start) as u8;
-            let out = format!("{}{ch}", buf.render_from(start));
-            finish_escape(buf, cfg, ch);
-            return EngineAction::Replace { n, chars: out };
-        };
+            return displayed.diff_to_str(&target, Some(ch));
+        }
+
+        let prev_idx = buf.len().saturating_sub(2);
+        if last.base_lc() == 'o'
+            && last.horn
+            && buf.len() >= 2
+            && buf.chars[prev_idx].base_lc() == 'u'
+            && buf.chars[prev_idx].horn
+        {
+            buf.chars[prev_idx].horn = false;
+            buf.chars[prev_idx].implicit_horn = false;
+        }
+        let c = buf.last_mut().unwrap();
+        c.horn = false;
+        c.implicit_horn = false;
+        c.brev = false;
+        let target = format!("{}{ch}", buf.render_all());
         finish_escape(buf, cfg, ch);
-        return EngineAction::Replace { n: 1, chars };
+        return displayed.diff_to_str(&target, Some(ch));
     }
 
     let syl = buf.analyze();
@@ -387,16 +394,15 @@ fn apply_w(buf: &mut WordBuffer, cfg: &Config, ch: char, displayed_before: &str)
                 .map(ViChar::base_lc)
                 .collect();
             if !is_valid_vi_initial(&lcs_init, buf.chars[0].stroke) {
-                return push_and_check_spell(buf, cfg, ch, displayed_before);
+                return push_and_check_spell(buf, cfg, ch, displayed);
             }
         }
-        let start = apply_uo_or_single_horn(buf, &syl, target_idx);
-        let tone_shift = reanchor_existing_tone(buf, cfg.orthography);
-        let final_start = tone_shift.map_or(start, |s| s.min(start));
-        return EngineAction::Replace {
-            n: (buf.len() - final_start) as u8,
-            chars: buf.render_from(final_start),
-        };
+        let _ = apply_uo_or_single_horn(buf, &syl, target_idx);
+        let _ = reanchor_existing_tone(buf, cfg.orthography);
+        if cfg.spell_check && !buf.is_valid_vietnamese() {
+            return buf.restore_to_raw_from(displayed, Some(ch));
+        }
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     let adjacent_eligible = match last.base_lc() {
@@ -422,58 +428,47 @@ fn apply_w(buf: &mut WordBuffer, cfg: &Config, ch: char, displayed_before: &str)
                 .map(ViChar::base_lc)
                 .collect();
             if !is_valid_vi_initial(&lcs_init, buf.chars[0].stroke) {
-                return push_and_check_spell(buf, cfg, ch, displayed_before);
+                return push_and_check_spell(buf, cfg, ch, displayed);
             }
         }
         let last_idx = buf.len() - 1;
-        let start = match last.base_lc() {
-            'a' => {
-                buf.set_last_brev();
-                last_idx
+        match last.base_lc() {
+            'a' => buf.set_last_brev(),
+            'o' | 'u' => {
+                let _ = apply_uo_or_single_horn(buf, &syl, last_idx);
             }
-            'o' | 'u' => apply_uo_or_single_horn(buf, &syl, last_idx),
             _ => unreachable!(),
-        };
-        let tone_shift = reanchor_existing_tone(buf, cfg.orthography);
-        let final_start = tone_shift.map_or(start, |s| s.min(start));
-        if cfg.spell_check && !buf.is_valid_vietnamese() {
-            return if cfg.repeated_restore {
-                buf.restore_to_raw(displayed_before)
-            } else {
-                buf.passthrough = true;
-                diff_action(displayed_before, &buf.raw_string())
-            };
         }
-        return EngineAction::Replace {
-            n: (buf.len() - final_start) as u8,
-            chars: buf.render_from(final_start),
-        };
+        let _ = reanchor_existing_tone(buf, cfg.orthography);
+        if cfg.spell_check && !buf.is_valid_vietnamese() {
+            return buf.restore_to_raw_from(displayed, Some(ch));
+        }
+        return displayed.diff_to_buf(buf, Some(ch));
     }
 
     if allow_shorthand_u && syl.nucleus.is_empty() {
         let lcs_init: Vec<char> = buf.chars.iter().map(ViChar::base_lc).collect();
-        if is_valid_vi_initial(&lcs_init, buf.chars[0].stroke) && lcs_init != ['q'] {
+        if is_valid_vi_initial(&lcs_init, buf.chars[0].stroke)
+            && lcs_init != ['q']
+            && lcs_init != ['p']
+        {
             buf.push(ch);
             if let Some(c) = buf.last_mut() {
                 c.ch = if ch.is_uppercase() { 'U' } else { 'u' };
                 c.horn = true;
             }
-            let glyph = if ch.is_uppercase() { "Ư" } else { "ư" };
-            return EngineAction::Replace {
-                n: 0,
-                chars: glyph.to_string(),
-            };
+            return displayed.diff_to_buf(buf, Some(ch));
         }
     }
 
     if matches!(cfg.method, InputMethod::Telex)
         && !syl.nucleus.is_empty()
-        && let Some(action) = try_delayed_w(buf, cfg, &syl, ch)
+        && let Some(action) = try_delayed_w(buf, cfg, &syl, ch, displayed)
     {
         return action;
     }
 
-    push_and_check_spell(buf, cfg, ch, displayed_before)
+    push_and_check_spell(buf, cfg, ch, displayed)
 }
 
 fn try_delayed_w(
@@ -481,25 +476,26 @@ fn try_delayed_w(
     cfg: &Config,
     syl: &crate::word::Syllable,
     ch: char,
+    displayed: &DisplayedSnapshot,
 ) -> Option<EngineAction> {
     let target = find_delayed_w_target(buf, syl);
 
     if target.is_none() {
         if cfg.repeated_restore
-            && let Some(&first_marked) = syl
+            && syl
                 .nucleus
                 .iter()
-                .find(|&&i| buf.chars[i].horn || buf.chars[i].brev)
+                .any(|&i| buf.chars[i].horn || buf.chars[i].brev)
         {
             for &i in &syl.nucleus {
                 buf.chars[i].horn = false;
                 buf.chars[i].implicit_horn = false;
                 buf.chars[i].brev = false;
             }
-            let n = (buf.len() - first_marked) as u8;
-            let chars = format!("{}{ch}", buf.render_from(first_marked));
+            let _ = reanchor_existing_tone(buf, cfg.orthography);
+            let out = format!("{}{ch}", buf.render_all());
             finish_escape(buf, cfg, ch);
-            return Some(EngineAction::Replace { n, chars });
+            return Some(displayed.diff_to_str(&out, Some(ch)));
         }
         return None;
     }
@@ -510,23 +506,18 @@ fn try_delayed_w(
 
     let target_idx = target?;
     let mut trial = buf.clone();
-    let trial_start = if trial.chars[target_idx].base_lc() == 'a' {
+    if trial.chars[target_idx].base_lc() == 'a' {
         trial.chars[target_idx].brev = true;
-        target_idx
     } else {
-        apply_uo_or_single_horn(&mut trial, syl, target_idx)
-    };
-    if !trial.is_valid_vietnamese() {
+        let _ = apply_uo_or_single_horn(&mut trial, syl, target_idx);
+    }
+    if trial.chars == buf.chars || !trial.is_valid_vietnamese() {
         return None;
     }
 
     *buf = trial;
-    let tone_shift = reanchor_existing_tone(buf, cfg.orthography);
-    let start = tone_shift.map_or(trial_start, |s| s.min(trial_start));
-    Some(EngineAction::Replace {
-        n: (buf.len() - start) as u8,
-        chars: buf.render_from(start),
-    })
+    let _ = reanchor_existing_tone(buf, cfg.orthography);
+    Some(displayed.diff_to_buf(buf, Some(ch)))
 }
 
 fn find_delayed_w_target(buf: &WordBuffer, syl: &crate::word::Syllable) -> Option<usize> {
