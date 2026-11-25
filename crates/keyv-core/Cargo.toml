@@ -1,6 +1,6 @@
 [package]
 name = "keyv-core"
-version = "0.3.3"
+version = "0.3.4"
 edition.workspace = true
 license.workspace = true
 description = "KeyV — Vietnamese input engine core: Telex/VNI finite-state machine. Clean-room implementation, no GPL-derived code."

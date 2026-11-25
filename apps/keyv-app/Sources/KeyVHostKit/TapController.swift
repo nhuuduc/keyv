@@ -16,20 +16,32 @@ public final class TapController: NSObject {
 
     public var engine: ViEngine
     public let injector: EventInjector
+    public let remoteDetector: RemoteInputDetector
     public var activeBundleID: String?
     public var activePID: pid_t = 0
     public var onModeToggleShortcut: (() -> Void)?
     public var ctrlShiftSwitchEnabled: Bool
+    public var remoteDesktopMode: RemoteDesktopMode
     public var isSecureInputActive: Bool = false
+    public private(set) var lastRemoteSource: RemoteSourceKind = .local
 
     private var ctrlShiftArmed = false
     private var ctrlShiftDisqualified = false
     private var consumedKeyLo: UInt64 = 0
     private var consumedKeyHi: UInt64 = 0
+    private var remoteZeroKeyConsumedCount: Int = 0
     private var lastReplaceUptimeNs: UInt64 = 0
+    private var lastReplaceEventTs: CGEventTimestamp = 0
     private var needsFrontmostRefresh = false
+    private var lastEventWasRemote = false
+    private var remoteMobileWordActive = false
+    private var remoteAutoReplaceUntilNs: UInt64 = 0
+    private var lastRemoteBackspaceNs: UInt64 = 0
+    private var remoteBackspaceBurstCount: Int = 0
 
     private static let postReplaceSerializeWindowNs: UInt64 = 80_000_000
+    private static let remoteBackspaceBurstWindowNs: UInt64 = 15_000_000
+    private static let remoteAutoReplaceWindowNs: UInt64 = 25_000_000
     private static let blockingModifiers: CGEventFlags = [
         .maskCommand,
         .maskControl,
@@ -37,11 +49,24 @@ public final class TapController: NSObject {
         .maskSecondaryFn,
         .maskHelp,
     ]
+    private static let remoteCoreBlockingModifiers: CGEventFlags = [
+        .maskCommand,
+        .maskControl,
+        .maskAlternate,
+        .maskHelp,
+    ]
 
-    public init(engine: ViEngine, injector: EventInjector) {
+    public init(
+        engine: ViEngine,
+        injector: EventInjector,
+        remoteDetector: RemoteInputDetector = .shared
+    ) {
         self.engine = engine
         self.injector = injector
-        self.ctrlShiftSwitchEnabled = AppSettings.shared.ctrlShiftSwitch
+        self.remoteDetector = remoteDetector
+        let settings = AppSettings.shared
+        self.ctrlShiftSwitchEnabled = settings.ctrlShiftSwitch
+        self.remoteDesktopMode = settings.remoteDesktopMode
         self.isSecureInputActive = IsSecureEventInputEnabled()
         if let front = NSWorkspace.shared.frontmostApplication {
             self.activeBundleID = front.bundleIdentifier
@@ -94,6 +119,7 @@ public final class TapController: NSObject {
         ctrlShiftArmed = false
         ctrlShiftDisqualified = false
         clearConsumedKeys()
+        resetRemoteInputState()
         lastReplaceUptimeNs = 0
         needsFrontmostRefresh = false
         SelectionCacheService.shared.invalidate()
@@ -112,6 +138,7 @@ public final class TapController: NSObject {
         ctrlShiftArmed = false
         ctrlShiftDisqualified = false
         clearConsumedKeys()
+        resetRemoteInputState()
         lastReplaceUptimeNs = 0
         needsFrontmostRefresh = false
         SelectionCacheService.shared.invalidate()
@@ -125,6 +152,11 @@ public final class TapController: NSObject {
         let settings = AppSettings.shared
         ctrlShiftSwitchEnabled = settings.ctrlShiftSwitch
         injector.compatFixEnabled = settings.compatFix
+        if remoteDesktopMode != settings.remoteDesktopMode {
+            remoteDesktopMode = settings.remoteDesktopMode
+            resetRemoteInputState()
+            engine.reset()
+        }
     }
 
     public func refreshSecureInputState() {
@@ -145,6 +177,7 @@ public final class TapController: NSObject {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             engine.reset()
             clearConsumedKeys()
+            resetRemoteInputState()
             lastReplaceUptimeNs = 0
             SelectionCacheService.shared.invalidate()
             return nil
@@ -162,8 +195,27 @@ public final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let sourcePID = pid_t(truncatingIfNeeded: event.getIntegerValueField(.eventSourceUnixProcessID))
+        let remoteSource = remoteDetector.sourceKind(for: sourcePID, nowNs: nowNs)
+        let isRemote = remoteSource.isRemote
+        if isRemote {
+            lastRemoteSource = remoteSource
+        }
+
+        if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            lastEventWasRemote = true
+            return Unmanaged.passUnretained(event)
+        }
+
         if type == .keyUp {
             let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if isRemote && keyCode == 0 && remoteZeroKeyConsumedCount > 0 {
+                remoteZeroKeyConsumedCount -= 1
+                return nil
+            }
             return takeConsumedKey(keyCode) ? nil : Unmanaged.passUnretained(event)
         }
 
@@ -179,11 +231,19 @@ public final class TapController: NSObject {
 
         if type != .keyDown {
             engine.reset()
+            resetRemoteInputState()
             lastReplaceUptimeNs = 0
             needsFrontmostRefresh = true
             SelectionCacheService.shared.invalidate()
             refreshSecureInputState()
             return Unmanaged.passUnretained(event)
+        }
+
+        if lastEventWasRemote != isRemote {
+            engine.reset()
+            resetRemoteInputState()
+            lastReplaceUptimeNs = 0
+            lastEventWasRemote = isRemote
         }
 
         if proxy != nil && needsFrontmostRefresh {
@@ -206,31 +266,83 @@ public final class TapController: NSObject {
         }
 
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        _ = takeConsumedKey(keyCode)
+        if !(isRemote && keyCode == 0) {
+            _ = takeConsumedKey(keyCode)
+        }
 
-        if !event.flags.intersection(Self.blockingModifiers).isEmpty
-            || (keyCode != 76 && event.flags.contains(.maskNumericPad)) {
+        let remoteZeroKeyString: String? = (isRemote && keyCode == 0) ? event.keyboardString() : nil
+        let hasBlockingModifier: Bool
+        if isRemote && keyCode == 0 {
+            let isAppleFunctionScalar = remoteZeroKeyString?.unicodeScalars.first.map {
+                (0xF700...0xF8FF).contains($0.value)
+            } ?? false
+            hasBlockingModifier = !event.flags.intersection(Self.remoteCoreBlockingModifiers).isEmpty
+                || isAppleFunctionScalar
+        } else {
+            hasBlockingModifier = !event.flags.intersection(Self.blockingModifiers).isEmpty
+                || (keyCode != 76 && event.flags.contains(.maskNumericPad))
+        }
+
+        if hasBlockingModifier {
             SelectionCacheService.shared.invalidate()
             engine.reset()
+            remoteMobileWordActive = false
+            remoteAutoReplaceUntilNs = 0
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
         if isSecureInputActive {
             engine.reset()
+            resetRemoteInputState()
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
-        let nowNs = DispatchTime.now().uptimeNanoseconds
-        let withinPostReplaceWindow = lastReplaceUptimeNs != 0
+        let eventTimeNs = event.timestamp != 0 ? event.timestamp : nowNs
+        let withinWallWindow = lastReplaceUptimeNs != 0
             && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
+        let withinEventTsWindow = event.timestamp == 0
+            || lastReplaceEventTs == 0
+            || (event.timestamp >= lastReplaceEventTs
+                && (event.timestamp &- lastReplaceEventTs) <= Self.postReplaceSerializeWindowNs)
+        let withinPostReplaceWindow = withinWallWindow && withinEventTsWindow
 
-        if keyCode == 51 {
+        let isBackspace = (keyCode == 51)
+            || (remoteZeroKeyString == "\u{0008}" || remoteZeroKeyString == "\u{007F}")
+
+        if isBackspace {
+            if isRemote && remoteDesktopMode == .smartAuto {
+                if lastRemoteBackspaceNs != 0
+                    && eventTimeNs >= lastRemoteBackspaceNs
+                    && (eventTimeNs &- lastRemoteBackspaceNs) <= Self.remoteBackspaceBurstWindowNs {
+                    remoteBackspaceBurstCount += 1
+                } else {
+                    remoteBackspaceBurstCount = 1
+                }
+                lastRemoteBackspaceNs = eventTimeNs
+
+                if remoteMobileWordActive {
+                    engine.reset()
+                    lastReplaceUptimeNs = 0
+                    return Unmanaged.passUnretained(event)
+                }
+                if remoteBackspaceBurstCount >= 2 {
+                    engine.reset()
+                    lastReplaceUptimeNs = 0
+                    remoteAutoReplaceUntilNs = eventTimeNs &+ Self.remoteAutoReplaceWindowNs
+                    return Unmanaged.passUnretained(event)
+                }
+            }
             engine.processBackspace()
             if withinPostReplaceWindow {
-                markKeyConsumed(keyCode)
-                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                consumeKey(keyCode, isRemote: isRemote)
+                injector.postClonedEvent(
+                    event,
+                    triggerTimestamp: event.timestamp,
+                    proxy: proxy,
+                    sanitizeRemoteFlags: isRemote
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
@@ -243,22 +355,46 @@ public final class TapController: NSObject {
         }
 
         // Navigation kills word composition: reset the session.
-        if Self.navigationKeyCodes.contains(keyCode) {
+        if Self.navigationKeyCodes.contains(keyCode) || remoteZeroKeyString == "\u{001B}" {
             SelectionCacheService.shared.invalidate()
             engine.reset()
+            remoteMobileWordActive = false
+            remoteAutoReplaceUntilNs = 0
+            lastRemoteBackspaceNs = 0
+            remoteBackspaceBurstCount = 0
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
 
-        if keyCode == 36 || keyCode == 76 || keyCode == 48 {
+        let delimiterBoundaryChar: Character?
+        if keyCode == 48 || remoteZeroKeyString == "\t" {
+            delimiterBoundaryChar = "\t"
+        } else if keyCode == 36 || keyCode == 76
+            || remoteZeroKeyString == "\r"
+            || remoteZeroKeyString == "\n"
+            || remoteZeroKeyString == "\r\n" {
+            delimiterBoundaryChar = "\r"
+        } else {
+            delimiterBoundaryChar = nil
+        }
+
+        if let boundaryChar = delimiterBoundaryChar {
             SelectionCacheService.shared.invalidate()
-            let boundaryChar: Character = (keyCode == 48) ? "\t" : "\r"
+            remoteMobileWordActive = false
+            remoteAutoReplaceUntilNs = 0
+            lastRemoteBackspaceNs = 0
+            remoteBackspaceBurstCount = 0
             let action = engine.process(boundaryChar)
             switch action {
             case .pass:
                 if withinPostReplaceWindow {
-                    markKeyConsumed(keyCode)
-                    injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                    consumeKey(keyCode, isRemote: isRemote)
+                    injector.postClonedEvent(
+                        event,
+                        triggerTimestamp: event.timestamp,
+                        proxy: proxy,
+                        sanitizeRemoteFlags: isRemote
+                    )
                     return nil
                 }
                 return Unmanaged.passUnretained(event)
@@ -267,48 +403,173 @@ public final class TapController: NSObject {
                 if wordChars.last == boundaryChar {
                     wordChars.removeLast()
                 }
-                markKeyConsumed(keyCode)
+                consumeKey(keyCode, isRemote: isRemote)
                 lastReplaceUptimeNs = nowNs
+                lastReplaceEventTs = event.timestamp
                 injector.realize(
                     .replace(backspaces: backspaces, chars: wordChars),
                     pid: targetPID,
                     bundleID: targetBundleID,
                     triggerTimestamp: event.timestamp,
-                    proxy: proxy
+                    proxy: proxy,
+                    isRemote: isRemote
                 )
-                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                injector.postClonedEvent(
+                    event,
+                    triggerTimestamp: event.timestamp,
+                    proxy: proxy,
+                    sanitizeRemoteFlags: isRemote
+                )
                 return nil
             }
         }
 
-        let characters = event.keyboardString()
-        guard characters.count == 1, let ch = characters.first else {
+        let inAutoReplaceBurst = isRemote
+            && remoteDesktopMode == .smartAuto
+            && remoteAutoReplaceUntilNs != 0
+            && eventTimeNs <= remoteAutoReplaceUntilNs
+        lastRemoteBackspaceNs = 0
+        remoteBackspaceBurstCount = 0
+
+        let characters = remoteZeroKeyString ?? event.keyboardString()
+        if characters.isEmpty {
             engine.reset()
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
+        }
+
+        if characters.utf16.count > 1 || characters.unicodeScalars.count > 1 {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            if isRemote && remoteDesktopMode == .smartAuto {
+                remoteMobileWordActive = !Self.endsWithWordBoundary(characters)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard let scalar = characters.unicodeScalars.first, let ch = characters.first else {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            return Unmanaged.passUnretained(event)
+        }
+
+        if scalar.value < 0x20 || scalar.value == 0x7F {
+            engine.reset()
+            remoteMobileWordActive = false
+            lastReplaceUptimeNs = 0
+            return Unmanaged.passUnretained(event)
+        }
+
+        if scalar.value > 0x7F {
+            engine.reset()
+            lastReplaceUptimeNs = 0
+            if isRemote && remoteDesktopMode == .smartAuto {
+                remoteMobileWordActive = Self.isMobileComposedScalar(scalar)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        if isRemote && remoteDesktopMode == .smartAuto {
+            if inAutoReplaceBurst {
+                engine.reset()
+                lastReplaceUptimeNs = 0
+                remoteMobileWordActive = Self.isWordContinuationASCII(scalar)
+                return Unmanaged.passUnretained(event)
+            }
+            if remoteMobileWordActive {
+                engine.reset()
+                lastReplaceUptimeNs = 0
+                if !Self.isWordContinuationASCII(scalar) {
+                    remoteMobileWordActive = false
+                }
+                return Unmanaged.passUnretained(event)
+            }
         }
 
         let action = engine.process(ch)
         switch action {
         case .pass:
             if withinPostReplaceWindow {
-                markKeyConsumed(keyCode)
-                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                consumeKey(keyCode, isRemote: isRemote)
+                injector.postClonedEvent(
+                    event,
+                    triggerTimestamp: event.timestamp,
+                    proxy: proxy,
+                    sanitizeRemoteFlags: isRemote
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .replace(let backspaces, let chars):
-            markKeyConsumed(keyCode)
+            consumeKey(keyCode, isRemote: isRemote)
             lastReplaceUptimeNs = nowNs
+            lastReplaceEventTs = event.timestamp
             injector.realize(
                 .replace(backspaces: backspaces, chars: chars),
                 pid: targetPID,
                 bundleID: targetBundleID,
                 triggerTimestamp: event.timestamp,
-                proxy: proxy
+                proxy: proxy,
+                isRemote: isRemote
             )
             return nil
         }
+    }
+
+    private func consumeKey(_ keyCode: Int, isRemote: Bool) {
+        if isRemote && keyCode == 0 {
+            remoteZeroKeyConsumedCount = min(remoteZeroKeyConsumedCount + 1, 32)
+        } else {
+            markKeyConsumed(keyCode)
+        }
+    }
+
+    private func resetRemoteInputState() {
+        lastEventWasRemote = false
+        remoteMobileWordActive = false
+        remoteAutoReplaceUntilNs = 0
+        lastRemoteBackspaceNs = 0
+        remoteBackspaceBurstCount = 0
+        remoteZeroKeyConsumedCount = 0
+        lastReplaceEventTs = 0
+    }
+
+    private static func isMobileComposedScalar(_ scalar: UnicodeScalar) -> Bool {
+        let v = scalar.value
+        if (0x0300...0x036F).contains(v)
+            || (0x1DC0...0x1DFF).contains(v)
+            || (0x20D0...0x20FF).contains(v)
+            || (0xFE20...0xFE2F).contains(v) {
+            return true
+        }
+        if scalar.properties.isDiacritic {
+            return true
+        }
+        let cat = scalar.properties.generalCategory
+        if cat == .nonspacingMark || cat == .spacingMark || cat == .enclosingMark {
+            return true
+        }
+        return v > 0x7F && scalar.properties.isAlphabetic
+    }
+
+    private static func isWordContinuationASCII(_ scalar: UnicodeScalar) -> Bool {
+        let v = scalar.value
+        return (0x41...0x5A).contains(v)
+            || (0x61...0x7A).contains(v)
+            || (0x30...0x39).contains(v)
+            || v == 0x27
+            || v == 0x5F
+    }
+
+    private static func endsWithWordBoundary(_ text: String) -> Bool {
+        guard let last = text.unicodeScalars.last else { return true }
+        if isMobileComposedScalar(last) {
+            return false
+        }
+        if last.value <= 0x7F && isWordContinuationASCII(last) {
+            return false
+        }
+        return true
     }
 
     private func markKeyConsumed(_ keyCode: Int) {

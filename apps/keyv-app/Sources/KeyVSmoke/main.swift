@@ -595,6 +595,346 @@ do {
 }
 
 do {
+    var resolverCalls = 0
+    let detector = RemoteInputDetector { pid in
+        resolverCalls += 1
+        switch pid {
+        case 77_001:
+            return ProcessInspectorMetadata(
+                bundleID: "com.carriez.rustdesk",
+                executablePath: "/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+            )
+        case 77_002:
+            return ProcessInspectorMetadata(
+                bundleID: nil,
+                executablePath: "/Applications/RustDesk.app/Contents/MacOS/service"
+            )
+        case 77_003:
+            return ProcessInspectorMetadata(
+                bundleID: "com.apple.WebKit.WebContent",
+                executablePath: "/Users/dev/orca/workspaces/keyv/feat-rustdesk-remote-input/com.apple.WebKit.WebContent"
+            )
+        default:
+            return ProcessInspectorMetadata(bundleID: "com.apple.Terminal", executablePath: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")
+        }
+    }
+
+    let baseNs: UInt64 = 10_000_000_000
+    check(detector.sourceKind(for: 0, nowNs: baseNs) == .local ? "ok" : "bad", "ok", "RemoteInputDetector pid 0 fast-paths to .local")
+    check(detector.sourceKind(for: getpid(), nowNs: baseNs) == .local ? "ok" : "bad", "ok", "RemoteInputDetector self PID fast-paths to .local")
+    check(String(resolverCalls), "0", "RemoteInputDetector zero syscalls for pid 0 and self PID")
+
+    for i in 0..<1_000 {
+        let kind = detector.sourceKind(for: 77_001, nowNs: baseNs + UInt64(i) * 1_000)
+        if kind != .rustDesk {
+            failures.append("RemoteInputDetector expected .rustDesk at iteration \(i)")
+            break
+        }
+    }
+    check(String(resolverCalls), "1", "RemoteInputDetector caches PID lookup across 1000 events")
+    check(detector.sourceKind(for: 77_002, nowNs: baseNs) == .rustDesk ? "ok" : "bad", "ok", "RemoteInputDetector recognizes RustDesk root helper path")
+    check(detector.sourceKind(for: 77_003, nowNs: baseNs) == .local ? "ok" : "bad", "ok", "RemoteInputDetector ignores workspace folder substring false positive")
+    check(detector.sourceKind(for: 77_001, nowNs: baseNs + 61_000_000_000) == .rustDesk && resolverCalls == 4 ? "ok" : "bad", "ok", "RemoteInputDetector refreshes entry after cache TTL")
+
+    check(RemoteInputDetector.classify(bundleID: "com.carriez.rustdesk") == .rustDesk ? "ok" : "bad", "ok", "classify RustDesk bundle")
+    check(RemoteInputDetector.classify(bundleID: "com.philandro.anydesk") == .anyDesk ? "ok" : "bad", "ok", "classify AnyDesk bundle")
+    check(RemoteInputDetector.classify(bundleID: "com.teamviewer.TeamViewer") == .teamViewer ? "ok" : "bad", "ok", "classify TeamViewer bundle")
+    check(RemoteInputDetector.classify(processName: "screensharingd") == .screenSharing ? "ok" : "bad", "ok", "classify screensharingd daemon")
+    check(RemoteInputDetector.classify(processName: "ARDAgent") == .screenSharing ? "ok" : "bad", "ok", "classify ARDAgent")
+    check(RemoteInputDetector.classify(bundleID: "tv.parsec.www") == .parsec ? "ok" : "bad", "ok", "classify Parsec")
+    check(RemoteInputDetector.classify(bundleID: "com.p5sys.jump.connect") == .jumpDesktop ? "ok" : "bad", "ok", "classify Jump Desktop Connect")
+    check(RemoteInputDetector.classify(processName: "remoting_me2me_host") == .chromeRemoteDesktop ? "ok" : "bad", "ok", "classify Chrome Remote Desktop")
+    check(RemoteInputDetector.classify(processName: "sunshine") == .moonlightSunshine ? "ok" : "bad", "ok", "classify Sunshine")
+
+    let rustDeskPID: pid_t = 77_001
+
+    func makeRemoteUnicodeEvent(
+        _ text: String,
+        virtualKey: CGKeyCode = 0,
+        keyDown: Bool = true,
+        timestamp: UInt64,
+        flags: CGEventFlags = [],
+        pid: pid_t = rustDeskPID
+    ) -> CGEvent {
+        let src = CGEventSource(stateID: .hidSystemState)
+        let ev = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: keyDown)!
+        if !flags.isEmpty {
+            ev.flags.formUnion(flags)
+        }
+        ev.timestamp = timestamp
+        ev.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(pid))
+        let units = Array(text.utf16)
+        if !units.isEmpty {
+            ev.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        }
+        return ev
+    }
+
+    func makeRemoteHarness(mode: RemoteDesktopMode, bundleID: String = "com.google.Chrome") -> (
+        tap: TapController,
+        injector: EventInjector,
+        readScreen: () -> String,
+        clearScreen: () -> Void,
+        sendRemote: (_ text: String, _ virtualKey: CGKeyCode, _ timestamp: UInt64, _ flags: CGEventFlags) -> CGEvent?,
+        sendLocal: (_ ch: Character, _ timestamp: UInt64) -> Void,
+        emittedEvents: () -> [EventInjector.EmittedEvent]
+    ) {
+        let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)
+        engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+        let injector = EventInjector(compatFixEnabled: true)
+        let tap = TapController(engine: engine, injector: injector, remoteDetector: detector)
+        tap.remoteDesktopMode = mode
+        tap.activeBundleID = bundleID
+        tap.activePID = 5150
+        tap.isSecureInputActive = false
+
+        var screenBuf = ""
+        var emitted: [EventInjector.EmittedEvent] = []
+
+        let applyDelete = {
+            if !screenBuf.isEmpty { screenBuf.removeLast() }
+        }
+
+        injector.eventSink = { item in
+            emitted.append(item)
+            switch item {
+            case .virtualKey(let kc, true, _, _):
+                if kc == 51 { applyDelete() }
+                else if kc == 36 || kc == 76 { screenBuf += "<ENTER>" }
+                else if kc == 48 { screenBuf += "<TAB>" }
+            case .unicode(let u, true, _, _):
+                screenBuf += String(decoding: u, as: UTF16.self)
+            default:
+                break
+            }
+        }
+
+        let sendRemote = { (text: String, vk: CGKeyCode, ts: UInt64, flags: CGEventFlags) -> CGEvent? in
+            let down = makeRemoteUnicodeEvent(text, virtualKey: vk, keyDown: true, timestamp: ts, flags: flags)
+            let passed = tap.processEventForTesting(type: .keyDown, event: down)
+            if let passed {
+                let s = passed.keyboardString()
+                if vk == 51 || s == "\u{0008}" || s == "\u{007F}" {
+                    applyDelete()
+                } else if vk == 36 || vk == 76 || s == "\r" || s == "\n" || s == "\r\n" {
+                    screenBuf += "<ENTER>"
+                } else if vk == 48 || s == "\t" {
+                    screenBuf += "<TAB>"
+                } else {
+                    screenBuf += s
+                }
+            }
+            let up = makeRemoteUnicodeEvent(text, virtualKey: vk, keyDown: false, timestamp: ts + 100, flags: flags)
+            _ = tap.processEventForTesting(type: .keyUp, event: up)
+            return passed
+        }
+
+        let sendLocal = { (ch: Character, ts: UInt64) in
+            let down = makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)
+            if let passed = tap.processEventForTesting(type: .keyDown, event: down) {
+                screenBuf += passed.keyboardString()
+            }
+            let up = makeHardwareKeyEvent(ch, keyDown: false, timestamp: ts + 100)
+            _ = tap.processEventForTesting(type: .keyUp, event: up)
+        }
+
+        return (
+            tap,
+            injector,
+            { screenBuf },
+            { screenBuf = ""; emitted.removeAll(); engine.reset() },
+            sendRemote,
+            sendLocal,
+            { emitted }
+        )
+    }
+
+    do {
+        let h = makeRemoteHarness(mode: .smartAuto)
+        var ts: UInt64 = 5_000_000_000
+        _ = h.sendRemote("v", 0, ts, []); ts += 40_000_000
+        _ = h.sendRemote("i", 0, ts, []); ts += 40_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 2_000_000
+        _ = h.sendRemote("ệ", 0, ts, []); ts += 40_000_000
+        _ = h.sendRemote("t", 0, ts, []); ts += 40_000_000
+        _ = h.sendRemote("s", 0, ts, []); ts += 40_000_000
+        check(h.readScreen(), "vệts", "SmartAuto mobile precomposed 'v','i',[BS],'ệ','t','s' never hijacks trailing 't' or 's'")
+
+        _ = h.sendRemote(" ", 0, ts, []); ts += 40_000_000
+        for ch in "hayx" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 40_000_000
+        }
+        check(h.readScreen(), "vệts hãy", "SmartAuto resumes Telex cleanly on next word after space")
+
+        h.clearScreen()
+        _ = h.sendRemote("t", 0, ts, []); ts += 30_000_000
+        _ = h.sendRemote("e\u{0302}", 0, ts, []); ts += 30_000_000
+        _ = h.sendRemote("t", 0, ts, []); ts += 30_000_000
+        _ = h.sendRemote("s", 0, ts, []); ts += 30_000_000
+        check(h.readScreen(), "te\u{0302}ts", "SmartAuto NFD combining vowel suppresses mid-word Telex hijack")
+    }
+
+    do {
+        let h = makeRemoteHarness(mode: .smartAuto)
+        var ts: UInt64 = 6_000_000_000
+        let commitOut = h.sendRemote("xin chào", 0, ts, [])
+        check(commitOut != nil ? "ok" : "bad", "ok", "Multi-UTF16 mobile word commit passes through untouched")
+        ts += 20_000_000
+        _ = h.sendRemote(" ", 0, ts, []); ts += 20_000_000
+        for ch in "banj" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 20_000_000
+        }
+        check(h.readScreen(), "xin chào bạn", "Multi-UTF16 mobile word commit coexists with subsequent Telex")
+
+        h.clearScreen()
+        for ch in "tah" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 35_000_000
+        }
+        _ = h.sendRemote("", 51, ts, []); ts += 2_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 2_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 5_000_000
+        for ch in "task" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 2_000_000
+        }
+        check(h.readScreen(), "task", "Mobile rapid Backspace burst (<15ms) resets engine and passes ASCII autocorrect untouched")
+    }
+
+    do {
+        let h = makeRemoteHarness(mode: .smartAuto)
+        var ts: UInt64 = 7_000_000_000
+        for ch in "banj" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 25_000_000
+        }
+        check(h.readScreen(), "bạn", "RustDesk Translate mode keyCode==0 with 'b' uses UnicodeString instead of kVK_ANSI_A")
+
+        let nlPass = h.sendRemote("\n", 0, ts, [])
+        ts += 100_000_000
+        h.clearScreen()
+        _ = h.sendRemote("b", 0, ts, []); ts += 25_000_000
+        let untouchedNL = h.sendRemote("\n", 0, ts, [])
+        check(untouchedNL != nil ? "ok" : "bad", "ok", "keyCode==0 '\\n' without active transform passes original CGEvent untouched")
+        check(h.readScreen(), "b<ENTER>", "keyCode==0 '\\n' normalizes as Return delimiter")
+        _ = nlPass
+
+        h.clearScreen()
+        for ch in "data" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 25_000_000
+        }
+        _ = h.sendRemote("\n", 0, ts, [])
+        ts += 25_000_000
+        check(h.readScreen(), "data<ENTER>", "keyCode==0 '\\n' triggers incomplete Vietnamese word restoration before Return")
+
+        h.clearScreen()
+        ts += 100_000_000
+        for ch in "tieep" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 30_000_000
+        }
+        ts += 100_000_000
+        let delPass = h.sendRemote("\u{007F}", 0, ts, [])
+        check(delPass != nil ? "ok" : "bad", "ok", "keyCode==0 '\\u{7f}' passes original CGEvent when outside post-replace window")
+        ts += 40_000_000
+        _ = h.sendRemote("n", 0, ts, []); ts += 30_000_000
+        _ = h.sendRemote("g", 0, ts, []); ts += 30_000_000
+        _ = h.sendRemote("s", 0, ts, []); ts += 30_000_000
+        check(h.readScreen(), "tiếng", "keyCode==0 '\\u{7f}' updates engine backspace state accurately")
+    }
+
+    do {
+        let h = makeRemoteHarness(mode: .phoneKeyboardOnly)
+        var ts: UInt64 = 8_000_000_000
+        for ch in "hayx dduowcj " {
+            _ = h.sendRemote(String(ch), keyCodeForASCII(ch), ts, [])
+            ts += 10_000_000
+        }
+        check(h.readScreen(), "hayx dduowcj ", "phoneKeyboardOnly passes 100% of RustDesk keys untouched")
+
+        for ch in "hayx dduowcj" {
+            h.sendLocal(ch, ts)
+            ts += 10_000_000
+        }
+        check(h.readScreen(), "hayx dduowcj hãy được", "phoneKeyboardOnly keeps local Mac hardware keyboard composing Vietnamese")
+    }
+
+    for mode in [RemoteDesktopMode.smartAuto, .alwaysKeyV] {
+        let hRaw = makeRemoteHarness(mode: mode, bundleID: "com.google.Chrome")
+        let burstInput = "hayx dduowcj case ddc "
+        let baseBurstTs: UInt64 = 9_000_000_000
+        var leakedZeroKeyUps = 0
+
+        for ch in burstInput {
+            let vk = keyCodeForASCII(ch)
+            _ = hRaw.sendRemote(String(ch), vk, baseBurstTs, [.maskAlphaShift])
+        }
+        check(
+            hRaw.readScreen(),
+            "hãy được case đc ",
+            "0ms packet-burst raw-keycode Telex in \(mode)"
+        )
+        let hadRemoteBrowserSpacer = hRaw.emittedEvents().contains { ev in
+            if case .unicode(let u, true, _, _) = ev {
+                return u == [0x202F]
+            }
+            return false
+        }
+        check(hadRemoteBrowserSpacer ? "bad" : "ok", "ok", "Remote burst in Chrome skips unnecessary U+202F spacer (\(mode))")
+
+        let hZero = makeRemoteHarness(mode: mode, bundleID: "com.stablyai.orca")
+        var pendingZeroUps = 0
+        for ch in burstInput {
+            let down = makeRemoteUnicodeEvent(
+                String(ch),
+                virtualKey: 0,
+                keyDown: true,
+                timestamp: baseBurstTs,
+                flags: [.maskSecondaryFn, .maskNumericPad, .maskAlphaShift]
+            )
+            let passed = hZero.tap.processEventForTesting(type: .keyDown, event: down)
+            if passed == nil {
+                pendingZeroUps += 1
+            } else if let passed {
+                let up = makeRemoteUnicodeEvent(String(ch), virtualKey: 0, keyDown: false, timestamp: baseBurstTs)
+                _ = hZero.tap.processEventForTesting(type: .keyUp, event: up)
+                _ = passed
+            }
+        }
+        for _ in 0..<pendingZeroUps {
+            let up = makeRemoteUnicodeEvent("a", virtualKey: 0, keyDown: false, timestamp: baseBurstTs)
+            if hZero.tap.processEventForTesting(type: .keyUp, event: up) != nil {
+                leakedZeroKeyUps += 1
+            }
+        }
+        check(String(leakedZeroKeyUps), "0", "0ms overlapping keyCode==0 burst swallows all consumed keyUps (\(mode))")
+
+        let hZeroSeq = makeRemoteHarness(mode: mode, bundleID: "com.stablyai.orca")
+        for ch in burstInput {
+            _ = hZeroSeq.sendRemote(String(ch), 0, baseBurstTs, [.maskSecondaryFn, .maskNumericPad, .maskAlphaShift])
+        }
+        check(
+            hZeroSeq.readScreen(),
+            "hãy được case đc ",
+            "0ms packet-burst keyCode==0 Telex with stuck remote flags stripped in \(mode)"
+        )
+        let leakedStuckFlags = hZeroSeq.emittedEvents().contains { ev in
+            let flags: UInt64 = switch ev {
+            case .virtualKey(_, _, let f, _), .unicode(_, _, let f, _): f
+            }
+            let mask = CGEventFlags.maskSecondaryFn.rawValue
+                | CGEventFlags.maskNumericPad.rawValue
+                | CGEventFlags.maskAlphaShift.rawValue
+            return (flags & mask) != 0
+        }
+        check(leakedStuckFlags ? "bad" : "ok", "ok", "Synthetic & cloned events strip stuck remote modifier flags (\(mode))")
+    }
+}
+
+do {
     let v020 = SemVer(parsing: "0.2.0")
     let v030 = SemVer(parsing: "v0.3.0")
     let v030Beta = SemVer(parsing: "0.3.0-beta.1")
@@ -658,6 +998,12 @@ MainActor.assumeIsolated {
     check(model.repeatedRestore ? "true" : "false", "true", "fresh install enables repeatedRestore")
     check(model.ctrlShiftSwitch ? "true" : "false", "true", "fresh install enables Ctrl+Shift switch")
     check(model.autoCheckUpdates ? "true" : "false", "true", "fresh install enables autoCheckUpdates")
+    check(model.remoteDesktopMode == .smartAuto ? "ok" : "bad", "ok", "fresh install defaults remoteDesktopMode to .smartAuto")
+    model.remoteDesktopMode = .phoneKeyboardOnly
+    check(AppSettings.shared.remoteDesktopMode == .phoneKeyboardOnly ? "ok" : "bad", "ok", "SettingsModel persists .phoneKeyboardOnly")
+    model.remoteDesktopMode = .alwaysKeyV
+    check(AppSettings.shared.remoteDesktopMode == .alwaysKeyV ? "ok" : "bad", "ok", "SettingsModel persists .alwaysKeyV")
+    model.remoteDesktopMode = .smartAuto
     model.method = .vni
     model.isEnglishMode = true
     check(String(model.method.rawValue), "0", "English radio updates method picker")

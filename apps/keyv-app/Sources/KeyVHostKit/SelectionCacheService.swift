@@ -50,6 +50,30 @@ public final class SelectionCacheService {
         return info.needsAutocompleteSpacer
     }
 
+    public func hasActiveAutocompleteSelection(pid: pid_t, bundleID: String?) -> Bool {
+        let info = queryFocus(fallbackPID: pid, fallbackBundleID: bundleID)
+        guard info.needsAutocompleteSpacer == true, AXIsProcessTrusted() else {
+            return false
+        }
+        let sysWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(sysWide, 0.002)
+        var focusedRef: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(
+            sysWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        )
+        guard err == .success, let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
+            return false
+        }
+        let element = focusedRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.002)
+        guard let selected = Self.copyStringAttribute(element, kAXSelectedTextAttribute as CFString) else {
+            return false
+        }
+        return !selected.isEmpty
+    }
+
     private func queryFocus(fallbackPID: pid_t, fallbackBundleID: String?) -> CachedFocus {
         let nowNs = DispatchTime.now().uptimeNanoseconds
         if let cached,

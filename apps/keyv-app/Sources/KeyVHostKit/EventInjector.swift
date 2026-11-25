@@ -74,6 +74,15 @@ public final class EventInjector {
         .maskHelp,
     ]
 
+    private static let remoteArtifactModifiers: CGEventFlags = [
+        .maskControl,
+        .maskAlternate,
+        .maskCommand,
+        .maskAlphaShift,
+        .maskSecondaryFn,
+        .maskHelp,
+    ]
+
     public init(compatFixEnabled: Bool = AppSettings.shared.compatFix) {
         self.compatFixEnabled = compatFixEnabled
     }
@@ -87,7 +96,8 @@ public final class EventInjector {
         pid: pid_t,
         bundleID: String?,
         triggerTimestamp: CGEventTimestamp = 0,
-        proxy: CGEventTapProxy? = nil
+        proxy: CGEventTapProxy? = nil,
+        isRemote: Bool = false
     ) {
         switch action {
         case .pass:
@@ -108,6 +118,17 @@ public final class EventInjector {
                 isCompat = false
             } else if let override = compatSpacerOverrideForTesting {
                 isCompat = override(pid, bundleID)
+            } else if isRemote {
+                if eventSink != nil {
+                    isCompat = false
+                } else if Self.compatBundleIDs.contains(bundle) {
+                    isCompat = SelectionCacheService.shared.hasActiveAutocompleteSelection(
+                        pid: pid,
+                        bundleID: bundleID
+                    )
+                } else {
+                    isCompat = false
+                }
             } else if eventSink != nil {
                 isCompat = Self.compatBundleIDs.contains(bundle)
             } else if let axDecision = SelectionCacheService.shared.shouldUseAutocompleteSpacer(
@@ -134,15 +155,57 @@ public final class EventInjector {
     public func postClonedEvent(
         _ original: CGEvent,
         triggerTimestamp: CGEventTimestamp = 0,
-        proxy: CGEventTapProxy? = nil
+        proxy: CGEventTapProxy? = nil,
+        sanitizeRemoteFlags: Bool = false
     ) {
-        guard let downClone = original.copy() else { return }
         let kc = CGKeyCode(truncatingIfNeeded: original.getIntegerValueField(.keyboardEventKeycode))
+        let str = original.keyboardString()
+        if sanitizeRemoteFlags && kc == 0 {
+            if str == "\r" || str == "\n" || str == "\r\n" {
+                postNormalizedClonedVirtualKey(
+                    returnKeyCode,
+                    originalFlags: original.flags,
+                    preserveShift: true,
+                    minimumTimestamp: triggerTimestamp,
+                    proxy: proxy
+                )
+                return
+            }
+            if str == "\t" {
+                postNormalizedClonedVirtualKey(
+                    tabKeyCode,
+                    originalFlags: original.flags,
+                    preserveShift: true,
+                    minimumTimestamp: triggerTimestamp,
+                    proxy: proxy
+                )
+                return
+            }
+            if str == "\u{0008}" || str == "\u{007F}" {
+                postNormalizedClonedVirtualKey(
+                    backspaceKeyCode,
+                    originalFlags: original.flags,
+                    preserveShift: false,
+                    minimumTimestamp: triggerTimestamp,
+                    proxy: proxy
+                )
+                return
+            }
+        }
+
+        guard let downClone = original.copy() else { return }
         guard let upEvent = CGEvent(keyboardEventSource: syntheticSource, virtualKey: kc, keyDown: false) else {
             return
         }
         upEvent.flags = original.flags
-        let str = original.keyboardString()
+        if sanitizeRemoteFlags {
+            downClone.flags.subtract(Self.remoteArtifactModifiers)
+            upEvent.flags.subtract(Self.remoteArtifactModifiers)
+            if kc != keypadEnterKeyCode {
+                downClone.flags.remove(.maskNumericPad)
+                upEvent.flags.remove(.maskNumericPad)
+            }
+        }
         let units = Array(str.utf16)
         if !units.isEmpty {
             upEvent.keyboardSetUnicodeString(stringLength: CFIndex(units.count), unicodeString: units)
@@ -174,6 +237,39 @@ public final class EventInjector {
 
         post(downClone, proxy: proxy)
         post(upEvent, proxy: proxy)
+    }
+
+    private func postNormalizedClonedVirtualKey(
+        _ keyCode: CGKeyCode,
+        originalFlags: CGEventFlags,
+        preserveShift: Bool,
+        minimumTimestamp: CGEventTimestamp,
+        proxy: CGEventTapProxy?
+    ) {
+        guard let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: syntheticSource, virtualKey: keyCode, keyDown: false)
+        else { return }
+        let downTS = nextTimestamp(minimum: minimumTimestamp)
+        let upTS = nextTimestamp(minimum: downTS)
+        stamp(keyDown, timestamp: downTS)
+        stamp(keyUp, timestamp: upTS)
+        if preserveShift && originalFlags.contains(.maskShift) {
+            keyDown.flags.insert(.maskShift)
+            keyUp.flags.insert(.maskShift)
+        }
+        if let eventSink {
+            recordedClonedKeys.append(
+                ClonedKeyRecord(keyCode: keyCode, keyDown: true, flags: keyDown.flags.rawValue, timestamp: downTS)
+            )
+            recordedClonedKeys.append(
+                ClonedKeyRecord(keyCode: keyCode, keyDown: false, flags: keyUp.flags.rawValue, timestamp: upTS)
+            )
+            eventSink(.virtualKey(keyCode: keyCode, keyDown: true, flags: keyDown.flags.rawValue, timestamp: downTS))
+            eventSink(.virtualKey(keyCode: keyCode, keyDown: false, flags: keyUp.flags.rawValue, timestamp: upTS))
+            return
+        }
+        post(keyDown, proxy: proxy)
+        post(keyUp, proxy: proxy)
     }
 
     public func postPassthroughCharacter(

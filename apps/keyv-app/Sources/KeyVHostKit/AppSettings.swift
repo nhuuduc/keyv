@@ -2,6 +2,45 @@ import Foundation
 import Carbon.HIToolbox
 import KeyVCore
 
+public enum RemoteDesktopMode: Int, CaseIterable, Sendable {
+    case smartAuto = 0
+    case phoneKeyboardOnly = 1
+    case alwaysKeyV = 2
+
+    public var shortTitle: String {
+        switch self {
+        case .smartAuto:
+            return "Tự động thông minh (Khuyên dùng)"
+        case .phoneKeyboardOnly:
+            return "Nhường bàn phím điện thoại"
+        case .alwaysKeyV:
+            return "Luôn dùng KeyV"
+        }
+    }
+
+    public var menuTitle: String {
+        switch self {
+        case .smartAuto:
+            return "Tự động thông minh — nhận diện bàn phím ĐT & Telex"
+        case .phoneKeyboardOnly:
+            return "Nhường hoàn toàn bàn phím điện thoại"
+        case .alwaysKeyV:
+            return "Luôn dùng bộ gõ KeyV (bàn phím ĐT tiếng Anh)"
+        }
+    }
+
+    public var detailSubtitle: String {
+        switch self {
+        case .smartAuto:
+            return "Tự nhận diện khi bàn phím điện thoại đã gõ sẵn tiếng Việt hoặc gợi ý từ để tránh lỗi chồng dấu, đồng thời vẫn gõ Telex mượt khi điện thoại để bàn phím tiếng Anh. Bàn phím vật lý trên máy Mac luôn hoạt động bình thường."
+        case .phoneKeyboardOnly:
+            return "Chuyển thẳng 100% phím từ RustDesk / điều khiển từ xa để dùng bàn phím tiếng Việt trên iOS/Android. Bàn phím vật lý trên máy Mac vẫn giữ nguyên chế độ gõ Tiếng Việt mà không cần bấm chuyển V/E."
+        case .alwaysKeyV:
+            return "Luôn dùng bộ gõ KeyV cho các phím ký tự đơn gửi từ xa (phù hợp khi điện thoại cố định ở bàn phím tiếng Anh), đồng thời vẫn giữ nguyên chuỗi nhiều ký tự khi dán văn bản hoặc chèn emoji."
+        }
+    }
+}
+
 /// Global engine settings persisted to UserDefaults, with change callbacks.
 public final class AppSettings: NSObject {
     public static let shared = AppSettings()
@@ -29,6 +68,7 @@ public final class AppSettings: NSObject {
             "overlayHotKeyCode": 49,
             "overlayHotKeyModifiers": UInt(optionKey),
             "clipboardRetentionLimit": 200,
+            "remoteDesktopMode": RemoteDesktopMode.smartAuto.rawValue,
         ])
         super.init()
     }
@@ -178,6 +218,17 @@ public final class AppSettings: NSObject {
     public var clipboardRetentionLimit: Int {
         get { defaults.object(forKey: "clipboardRetentionLimit") == nil ? 200 : defaults.integer(forKey: "clipboardRetentionLimit") }
         set { defaults.set(newValue, forKey: "clipboardRetentionLimit"); notifyChanged() }
+    }
+
+    public var remoteDesktopMode: RemoteDesktopMode {
+        get {
+            guard defaults.object(forKey: "remoteDesktopMode") != nil else { return .smartAuto }
+            return RemoteDesktopMode(rawValue: defaults.integer(forKey: "remoteDesktopMode")) ?? .smartAuto
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: "remoteDesktopMode")
+            notifyChanged()
+        }
     }
 
     // MARK: Seen apps (for the per-app editor's suggestions)
