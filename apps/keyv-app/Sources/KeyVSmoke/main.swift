@@ -158,6 +158,16 @@ private func simulateFastRolloverBurst(
     var leakedConsumedKeyUps = 0
 
     for (idx, ch) in input.enumerated() {
+        while let existingIdx = pendingKeyUps.firstIndex(where: { $0.0 == ch }) {
+            let (upCh, consumed) = pendingKeyUps.removeFirst()
+            ts += 1_000_000
+            let up = makeHardwareKeyEvent(upCh, keyDown: false, timestamp: ts)
+            let passedUp = tap.processEventForTesting(type: .keyUp, event: up)
+            if consumed && passedUp != nil {
+                leakedConsumedKeyUps += 1
+            }
+            if existingIdx == 0 { break }
+        }
         ts += 5_000_000
         let down = makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)
         let passed = tap.processEventForTesting(type: .keyDown, event: down)
@@ -210,6 +220,21 @@ check(
 // Real-world fast Vietnamese + English cases
 check(screen("hayx", method: .telex, orthography: .modern, spellCheck: true), "hãy", "fast hayx modern")
 check(screen("haxy", method: .telex, orthography: .modern, spellCheck: true), "hãy", "fast haxy modern")
+check(
+    screen("lene tene nhana dana cono mono hono mama ddeme theme totos motoj matas ddatas nhatas tiengse chuyener duongwfd dand", method: .telex, spellCheck: true),
+    "lên tên nhân dân côn môn hôn mâm đêm thêm tốt một mất đất nhất tiếng chuyển đường đan",
+    "delayed Telex circumflex/horn/stroke Vietnamese words"
+)
+check(
+    screen("lenee memee monoo dadd", method: .telex, spellCheck: true),
+    "lene meme mono dad",
+    "double-key escape restores ASCII words"
+)
+check(
+    screen("todo haha banana canada server terminal docker github testing window chrome safari data photo ", method: .telex, spellCheck: true),
+    "todo haha banana canada server terminal docker github testing window chrome safari data photo ",
+    "non-Vietnamese phonotactic and stop-coda word-boundary auto-restore"
+)
 check(screen("tesst", method: .telex, spellCheck: true), "test", "tesst escape to test")
 check(screen("tests", method: .telex, spellCheck: true), "tests", "tests restores English")
 check(screen("tester", method: .telex, spellCheck: true), "tester", "tester restores English")
@@ -323,6 +348,21 @@ do {
 
     let chromePlain = simulateFastRolloverBurst("hayx gox tieengs Vieetj nhanh", bundleID: "com.google.Chrome")
     check(chromePlain.text, "hãy gõ tiếng Việt nhanh", "Browser compat U+202F burst with no selection")
+
+    let delayedAndBoundaryBurst = simulateFastRolloverBurst(
+        "lene tene nhana mono dand data photo ",
+        bundleID: "com.stablyai.orca"
+    )
+    check(
+        delayedAndBoundaryBurst.text,
+        "lên tên nhân môn đan data photo ",
+        "TapController FIFO serializes delayed Telex + stop-coda boundary restore"
+    )
+    check(
+        String(delayedAndBoundaryBurst.leakedConsumedKeyUps),
+        "0",
+        "TapController swallows consumed keyUp in delayed/boundary burst"
+    )
 
     do {
         let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)

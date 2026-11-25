@@ -244,6 +244,9 @@ impl WordBuffer {
         if let Some(c) = self.last_mut() {
             c.hat = true;
             c.implicit_hat = false;
+            c.brev = false;
+            c.horn = false;
+            c.implicit_horn = false;
         }
     }
     pub fn set_last_horn(&mut self) {
@@ -255,6 +258,8 @@ impl WordBuffer {
     pub fn set_last_brev(&mut self) {
         if let Some(c) = self.last_mut() {
             c.brev = true;
+            c.hat = false;
+            c.implicit_hat = false;
         }
     }
     pub fn last_has_horn(&self) -> bool {
@@ -411,14 +416,6 @@ impl WordBuffer {
         {
             return false;
         }
-        if initial == ['p']
-            && syl
-                .nucleus
-                .iter()
-                .any(|&i| self.chars[i].brev || self.chars[i].horn || self.chars[i].hat)
-        {
-            return false;
-        }
 
         let coda = &lcs[syl.coda_start..];
         if coda.iter().any(|&c| is_vowel_base(c)) {
@@ -537,6 +534,16 @@ impl WordBuffer {
             return false;
         }
         let syl = self.analyze();
+        let lcs: Vec<char> = self.chars.iter().map(ViChar::base_lc).collect();
+        let coda = &lcs[syl.coda_start..];
+        if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t'])
+            && !self
+                .chars
+                .iter()
+                .any(|c| matches!(c.tone, Tone::Sac | Tone::Nang))
+        {
+            return false;
+        }
         let groups: Vec<VG> = syl
             .nucleus
             .iter()
@@ -545,11 +552,16 @@ impl WordBuffer {
                 vowel_group(c.base_lc(), c.hat, c.brev, c.horn)
             })
             .collect();
-        let has_coda = syl.coda_start < self.chars.len();
+        let has_coda = !coda.is_empty();
         if matches!(groups.as_slice(), [VG::Uhorn, VG::O]) {
             return false;
         }
-        if !has_coda && matches!(groups.as_slice(), [VG::Abrev] | [VG::O, VG::Abrev]) {
+        if !has_coda
+            && matches!(
+                groups.as_slice(),
+                [VG::Abrev] | [VG::O, VG::Abrev] | [VG::I, VG::E] | [VG::Y, VG::E] | [VG::U, VG::E]
+            )
+        {
             return false;
         }
         true

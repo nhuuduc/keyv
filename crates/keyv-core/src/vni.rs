@@ -109,13 +109,9 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         '6' | '7' | '8' => {
             let eligible_idx = |c: &ViChar| -> bool {
                 match digit {
-                    '6' => {
-                        matches!(c.base_lc(), 'a' | 'e' | 'o')
-                            && (!c.hat || c.implicit_hat)
-                            && !c.brev
-                    }
+                    '6' => matches!(c.base_lc(), 'a' | 'e' | 'o') && (!c.hat || c.implicit_hat),
                     '7' => matches!(c.base_lc(), 'o' | 'u') && !c.horn,
-                    '8' => c.base_lc() == 'a' && !c.hat && !c.brev,
+                    '8' => c.base_lc() == 'a' && !c.brev,
                     _ => false,
                 }
             };
@@ -135,15 +131,31 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
                     buf.record_raw(ch);
                     match digit {
                         '6' => {
+                            if buf.chars[idx].base_lc() == 'o'
+                                && let Some(pos) = syl.nucleus.iter().position(|&i| i == idx)
+                                && pos > 0
+                            {
+                                let prev_idx = syl.nucleus[pos - 1];
+                                if buf.chars[prev_idx].base_lc() == 'u'
+                                    && buf.chars[prev_idx].implicit_horn
+                                {
+                                    buf.chars[prev_idx].horn = false;
+                                    buf.chars[prev_idx].implicit_horn = false;
+                                }
+                            }
                             buf.chars[idx].hat = true;
                             buf.chars[idx].implicit_hat = false;
                             buf.chars[idx].horn = false;
+                            buf.chars[idx].implicit_horn = false;
+                            buf.chars[idx].brev = false;
                         }
                         '7' => {
                             let _ = apply_uo_or_single_horn(buf, &syl, idx);
                         }
                         '8' => {
                             buf.chars[idx].brev = true;
+                            buf.chars[idx].hat = false;
+                            buf.chars[idx].implicit_hat = false;
                         }
                         _ => unreachable!(),
                     }

@@ -79,9 +79,22 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         && buf.chars[0].stroke
         && matches!(cfg.method, InputMethod::Telex)
     {
+        let prev_raw_lc = buf
+            .raw_keys
+            .len()
+            .checked_sub(2)
+            .and_then(|i| buf.raw_keys[i].to_lowercase().next());
         buf.chars[0].stroke = false;
+        let had_other_explicit_mark = buf.has_explicit_mark();
         let target = format!("{}{ch}", buf.render_all());
-        finish_escape(buf, cfg, ch);
+        if cfg.spell_check && prev_raw_lc == Some('d') && !had_other_explicit_mark {
+            buf.chars = target.chars().map(ViChar::from_char).collect();
+            buf.leading_w_expansion = false;
+            buf.passthrough = true;
+            buf.escaped_double_tone = true;
+        } else {
+            finish_escape(buf, cfg, ch);
+        }
         return displayed.diff_to_str(&target, Some(ch));
     }
 
@@ -105,7 +118,6 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         && buf.len() >= 2
         && buf.chars[0].base_lc() == 'd'
         && !buf.chars[0].stroke
-        && (!cfg.spell_check || buf.has_any_transform() || buf.len() >= 4)
         && !buf.analyze().nucleus.is_empty()
         && buf.is_valid_vietnamese()
     {
@@ -163,13 +175,32 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
     match lc {
         // duplicate vowel → circumflex (adjacent or delayed in valid Vietnamese syllable)
         'a' | 'e' | 'o' => {
-            if buf.last_is_dup_circ_candidate(lc) {
-                buf.set_last_hat();
-                let _ = reanchor_existing_tone(buf, cfg.orthography);
-                if cfg.spell_check && !buf.is_valid_vietnamese() {
+            let can_switch_last = buf.last().is_some_and(|last| {
+                last.base_lc() == lc
+                    && !last.stroke
+                    && ((lc == 'a' && last.brev && !(cfg.spell_check && buf.len() == 1))
+                        || (lc == 'o' && last.horn))
+            });
+            if buf.last_is_dup_circ_candidate(lc) || can_switch_last {
+                let mut trial = buf.clone();
+                if lc == 'o'
+                    && trial.len() >= 2
+                    && trial.chars[trial.len() - 2].base_lc() == 'u'
+                    && trial.chars[trial.len() - 2].implicit_horn
+                {
+                    let prev_idx = trial.len() - 2;
+                    trial.chars[prev_idx].horn = false;
+                    trial.chars[prev_idx].implicit_horn = false;
+                }
+                trial.set_last_hat();
+                let _ = reanchor_existing_tone(&mut trial, cfg.orthography);
+                if cfg.spell_check && !trial.is_valid_vietnamese() {
                     return buf.restore_to_raw_from(&displayed, Some(ch));
                 }
-                return displayed.diff_to_buf(buf, Some(ch));
+                if !can_switch_last || trial.is_valid_vietnamese() {
+                    *buf = trial;
+                    return displayed.diff_to_buf(buf, Some(ch));
+                }
             }
             if let Some(action) = try_delayed_circumflex(buf, cfg, ch, lc, &displayed) {
                 return action;
@@ -265,28 +296,9 @@ fn try_delayed_circumflex(
         return None;
     }
 
-    let lcs: Vec<char> = buf.chars.iter().map(ViChar::base_lc).collect();
-    let initial = &lcs[..syl.initial_end];
-    let coda = &lcs[syl.coda_start..];
-    if initial == ['p'] {
-        return None;
-    }
-    if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t']) && buf.last_tone_idx().is_none() {
-        return None;
-    }
-    let prev_raw_lc = buf
-        .raw_keys
-        .len()
-        .checked_sub(2)
-        .and_then(|i| buf.raw_keys[i].to_lowercase().next());
-    let tone_just_typed = prev_raw_lc.and_then(tone_of_key).is_some();
-    if syl.nucleus.len() == 1 && coda.len() == 1 && !buf.has_explicit_mark() && !tone_just_typed {
-        return None;
-    }
-
     let cand_idx = syl.nucleus.iter().rev().copied().find(|&i| {
         let c = &buf.chars[i];
-        c.base_lc() == lc && !c.hat && !c.brev && !c.horn
+        c.base_lc() == lc && !c.hat
     })?;
 
     if cand_idx == buf.len() - 1 {
@@ -294,13 +306,26 @@ fn try_delayed_circumflex(
     }
 
     let mut trial = buf.clone();
+    if lc == 'o'
+        && let Some(pos) = syl.nucleus.iter().position(|&idx| idx == cand_idx)
+        && pos > 0
+    {
+        let prev_idx = syl.nucleus[pos - 1];
+        if trial.chars[prev_idx].base_lc() == 'u' && trial.chars[prev_idx].implicit_horn {
+            trial.chars[prev_idx].horn = false;
+            trial.chars[prev_idx].implicit_horn = false;
+        }
+    }
     trial.chars[cand_idx].hat = true;
+    trial.chars[cand_idx].implicit_hat = false;
+    trial.chars[cand_idx].brev = false;
+    trial.chars[cand_idx].horn = false;
+    trial.chars[cand_idx].implicit_horn = false;
     if !trial.is_valid_vietnamese() {
         return None;
     }
 
-    buf.chars[cand_idx].hat = true;
-    buf.chars[cand_idx].implicit_hat = false;
+    *buf = trial;
     let _ = reanchor_existing_tone(buf, cfg.orthography);
     Some(displayed.diff_to_buf(buf, Some(ch)))
 }
@@ -406,7 +431,7 @@ fn apply_w(
     }
 
     let adjacent_eligible = match last.base_lc() {
-        'a' if !last.hat && !last.brev => {
+        'a' if !last.brev => {
             syl.nucleus.len() <= 1
                 || (syl.nucleus.len() == 2
                     && buf.chars[syl.nucleus[0]].base_lc() == 'o'
@@ -508,6 +533,8 @@ fn try_delayed_w(
     let mut trial = buf.clone();
     if trial.chars[target_idx].base_lc() == 'a' {
         trial.chars[target_idx].brev = true;
+        trial.chars[target_idx].hat = false;
+        trial.chars[target_idx].implicit_hat = false;
     } else {
         let _ = apply_uo_or_single_horn(&mut trial, syl, target_idx);
     }
@@ -554,7 +581,7 @@ fn find_delayed_w_target(buf: &WordBuffer, syl: &crate::word::Syllable) -> Optio
         let idx = syl.nucleus[0];
         let c = &buf.chars[idx];
         match c.base_lc() {
-            'a' if !c.hat && !c.brev => return Some(idx),
+            'a' if !c.brev => return Some(idx),
             'o' | 'u' if !c.horn => return Some(idx),
             _ => {}
         }
