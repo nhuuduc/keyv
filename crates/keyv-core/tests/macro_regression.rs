@@ -39,7 +39,7 @@ fn macro_expansion_fires_on_match() {
     typer.set_macro("hvbt", "nhé bạn");
 
     let mut screen = String::new();
-    for ch in "hvbt".chars() {
+    for ch in "hvbt ".chars() {
         match typer.process_char(ch) {
             keyv_core::engine::EngineAction::Pass => screen.push(ch),
             keyv_core::engine::EngineAction::Replace { n, chars } => {
@@ -50,7 +50,7 @@ fn macro_expansion_fires_on_match() {
             }
         }
     }
-    assert_eq!(screen, "nhé bạn");
+    assert_eq!(screen, "nhé bạn ");
 }
 
 #[test]

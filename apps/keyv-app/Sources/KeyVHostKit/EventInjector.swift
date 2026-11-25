@@ -13,17 +13,27 @@ public final class EventInjector {
         case unicode(units: [UniChar], keyDown: Bool, flags: UInt64, timestamp: UInt64)
     }
 
+    public struct ClonedKeyRecord: Equatable {
+        public let keyCode: CGKeyCode
+        public let keyDown: Bool
+        public let flags: UInt64
+        public let timestamp: UInt64
+    }
+
     /// Synthetic events carry our own private source and marker so the tap can
     /// pass them through deterministically without feedback loops.
     private let syntheticSource = CGEventSource(stateID: .privateState)
 
     private let backspaceKeyCode: CGKeyCode = 51
     private let returnKeyCode: CGKeyCode = 36
+    private let keypadEnterKeyCode: CGKeyCode = 76
     private let tabKeyCode: CGKeyCode = 48
     private var lastTimestamp: CGEventTimestamp = 0
 
     public var compatFixEnabled: Bool = true
     public var eventSink: ((EmittedEvent) -> Void)?
+    public var compatSpacerOverrideForTesting: ((pid_t, String?) -> Bool)?
+    public private(set) var recordedClonedKeys: [ClonedKeyRecord] = []
 
     public static let compatBundleIDs: Set<String> = [
         "com.google.Chrome",
@@ -37,6 +47,9 @@ public final class EventInjector {
         "com.apple.Safari",
         "org.mozilla.firefox",
         "com.microsoft.Excel",
+        "com.apple.Spotlight",
+        "com.raycast.macos",
+        "com.runningwithcrayons.Alfred",
     ]
 
     public static let terminalBundleIDs: Set<String> = [
@@ -65,6 +78,10 @@ public final class EventInjector {
         self.compatFixEnabled = compatFixEnabled
     }
 
+    public func clearRecordedClonedKeys() {
+        recordedClonedKeys.removeAll()
+    }
+
     public func realize(
         _ action: ViEngineAction,
         pid: pid_t,
@@ -86,9 +103,21 @@ public final class EventInjector {
             var deleteCount = backspaces
             let bundle = bundleID ?? ""
             let isTerminal = Self.terminalBundleIDs.contains(bundle)
-            let isCompat = !isTerminal
-                && compatFixEnabled
-                && Self.compatBundleIDs.contains(bundle)
+            let isCompat: Bool
+            if !compatFixEnabled || isTerminal {
+                isCompat = false
+            } else if let override = compatSpacerOverrideForTesting {
+                isCompat = override(pid, bundleID)
+            } else if eventSink != nil {
+                isCompat = Self.compatBundleIDs.contains(bundle)
+            } else if let axDecision = SelectionCacheService.shared.shouldUseAutocompleteSpacer(
+                pid: pid,
+                bundleID: bundleID
+            ) {
+                isCompat = axDecision
+            } else {
+                isCompat = Self.compatBundleIDs.contains(bundle)
+            }
 
             if isCompat {
                 postUnicode(String(Self.autocompleteSpacerScalar), minimumTimestamp: triggerTimestamp, proxy: proxy)
@@ -100,6 +129,51 @@ public final class EventInjector {
                 postUnicode(chars, minimumTimestamp: triggerTimestamp, proxy: proxy)
             }
         }
+    }
+
+    public func postClonedEvent(
+        _ original: CGEvent,
+        triggerTimestamp: CGEventTimestamp = 0,
+        proxy: CGEventTapProxy? = nil
+    ) {
+        guard let downClone = original.copy() else { return }
+        let kc = CGKeyCode(truncatingIfNeeded: original.getIntegerValueField(.keyboardEventKeycode))
+        guard let upEvent = CGEvent(keyboardEventSource: syntheticSource, virtualKey: kc, keyDown: false) else {
+            return
+        }
+        upEvent.flags = original.flags
+        let str = original.keyboardString()
+        let units = Array(str.utf16)
+        if !units.isEmpty {
+            upEvent.keyboardSetUnicodeString(stringLength: CFIndex(units.count), unicodeString: units)
+        }
+
+        let downTS = nextTimestamp(minimum: triggerTimestamp)
+        let upTS = nextTimestamp(minimum: downTS)
+        downClone.timestamp = downTS
+        downClone.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+        upEvent.timestamp = upTS
+        upEvent.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+
+        if let eventSink {
+            recordedClonedKeys.append(
+                ClonedKeyRecord(keyCode: kc, keyDown: true, flags: downClone.flags.rawValue, timestamp: downTS)
+            )
+            recordedClonedKeys.append(
+                ClonedKeyRecord(keyCode: kc, keyDown: false, flags: upEvent.flags.rawValue, timestamp: upTS)
+            )
+            if kc == returnKeyCode || kc == keypadEnterKeyCode || kc == tabKeyCode || kc == backspaceKeyCode || units.isEmpty {
+                eventSink(.virtualKey(keyCode: kc, keyDown: true, flags: downClone.flags.rawValue, timestamp: downTS))
+                eventSink(.virtualKey(keyCode: kc, keyDown: false, flags: upEvent.flags.rawValue, timestamp: upTS))
+            } else {
+                eventSink(.unicode(units: units, keyDown: true, flags: downClone.flags.rawValue, timestamp: downTS))
+                eventSink(.unicode(units: units, keyDown: false, flags: upEvent.flags.rawValue, timestamp: upTS))
+            }
+            return
+        }
+
+        post(downClone, proxy: proxy)
+        post(upEvent, proxy: proxy)
     }
 
     public func postPassthroughCharacter(

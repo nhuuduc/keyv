@@ -676,6 +676,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     fileprivate func toggleOverlay() {
+        tap?.engine.reset()
+        SelectionCacheService.shared.invalidate()
         overlayPanel.toggleNearFrontmost()
     }
 }

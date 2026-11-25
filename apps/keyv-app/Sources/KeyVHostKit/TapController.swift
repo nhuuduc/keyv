@@ -27,14 +27,14 @@ public final class TapController: NSObject {
     private var consumedKeyLo: UInt64 = 0
     private var consumedKeyHi: UInt64 = 0
     private var lastReplaceUptimeNs: UInt64 = 0
+    private var needsFrontmostRefresh = false
 
     private static let postReplaceSerializeWindowNs: UInt64 = 80_000_000
-    private static let nonTypingModifiers: CGEventFlags = [
+    private static let blockingModifiers: CGEventFlags = [
         .maskCommand,
         .maskControl,
         .maskAlternate,
         .maskSecondaryFn,
-        .maskNumericPad,
         .maskHelp,
     ]
 
@@ -95,6 +95,8 @@ public final class TapController: NSObject {
         ctrlShiftDisqualified = false
         clearConsumedKeys()
         lastReplaceUptimeNs = 0
+        needsFrontmostRefresh = false
+        SelectionCacheService.shared.invalidate()
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -111,6 +113,8 @@ public final class TapController: NSObject {
         ctrlShiftDisqualified = false
         clearConsumedKeys()
         lastReplaceUptimeNs = 0
+        needsFrontmostRefresh = false
+        SelectionCacheService.shared.invalidate()
         activeBundleID = bundleID
         activePID = pid
         refreshSecureInputState()
@@ -142,6 +146,7 @@ public final class TapController: NSObject {
             engine.reset()
             clearConsumedKeys()
             lastReplaceUptimeNs = 0
+            SelectionCacheService.shared.invalidate()
             return nil
         default:
             break
@@ -175,14 +180,37 @@ public final class TapController: NSObject {
         if type != .keyDown {
             engine.reset()
             lastReplaceUptimeNs = 0
+            needsFrontmostRefresh = true
+            SelectionCacheService.shared.invalidate()
             refreshSecureInputState()
             return Unmanaged.passUnretained(event)
+        }
+
+        if proxy != nil && needsFrontmostRefresh {
+            needsFrontmostRefresh = false
+            if let front = NSWorkspace.shared.frontmostApplication {
+                activeBundleID = front.bundleIdentifier
+                activePID = front.processIdentifier
+            }
+        }
+
+        var targetPID = activePID
+        var targetBundleID = activeBundleID
+        if proxy != nil {
+            let resolved = SelectionCacheService.shared.resolveFocusedOverlayApp(
+                currentPID: activePID,
+                currentBundleID: activeBundleID
+            )
+            targetPID = resolved.pid
+            targetBundleID = resolved.bundleID
         }
 
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
         _ = takeConsumedKey(keyCode)
 
-        if !event.flags.intersection(Self.nonTypingModifiers).isEmpty {
+        if !event.flags.intersection(Self.blockingModifiers).isEmpty
+            || (keyCode != 76 && event.flags.contains(.maskNumericPad)) {
+            SelectionCacheService.shared.invalidate()
             engine.reset()
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
@@ -194,8 +222,17 @@ public final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let withinPostReplaceWindow = lastReplaceUptimeNs != 0
+            && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
+
         if keyCode == 51 {
             engine.processBackspace()
+            if withinPostReplaceWindow {
+                markKeyConsumed(keyCode)
+                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                return nil
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -207,9 +244,41 @@ public final class TapController: NSObject {
 
         // Navigation kills word composition: reset the session.
         if Self.navigationKeyCodes.contains(keyCode) {
+            SelectionCacheService.shared.invalidate()
             engine.reset()
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
+        }
+
+        if keyCode == 36 || keyCode == 76 || keyCode == 48 {
+            SelectionCacheService.shared.invalidate()
+            let boundaryChar: Character = (keyCode == 48) ? "\t" : "\r"
+            let action = engine.process(boundaryChar)
+            switch action {
+            case .pass:
+                if withinPostReplaceWindow {
+                    markKeyConsumed(keyCode)
+                    injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                    return nil
+                }
+                return Unmanaged.passUnretained(event)
+            case .replace(let backspaces, let chars):
+                var wordChars = chars
+                if wordChars.last == boundaryChar {
+                    wordChars.removeLast()
+                }
+                markKeyConsumed(keyCode)
+                lastReplaceUptimeNs = nowNs
+                injector.realize(
+                    .replace(backspaces: backspaces, chars: wordChars),
+                    pid: targetPID,
+                    bundleID: targetBundleID,
+                    triggerTimestamp: event.timestamp,
+                    proxy: proxy
+                )
+                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
+                return nil
+            }
         }
 
         let characters = event.keyboardString()
@@ -219,16 +288,12 @@ public final class TapController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
-        let nowNs = DispatchTime.now().uptimeNanoseconds
-        let hadActiveTransform = engine.hasActiveTransform
         let action = engine.process(ch)
         switch action {
         case .pass:
-            let withinPostReplaceWindow = lastReplaceUptimeNs != 0
-                && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
-            if (withinPostReplaceWindow || hadActiveTransform || engine.hasActiveTransform), ch.isASCII {
+            if withinPostReplaceWindow {
                 markKeyConsumed(keyCode)
-                injector.postPassthroughCharacter(ch, triggerTimestamp: event.timestamp, proxy: proxy)
+                injector.postClonedEvent(event, triggerTimestamp: event.timestamp, proxy: proxy)
                 return nil
             }
             return Unmanaged.passUnretained(event)
@@ -237,8 +302,8 @@ public final class TapController: NSObject {
             lastReplaceUptimeNs = nowNs
             injector.realize(
                 .replace(backspaces: backspaces, chars: chars),
-                pid: activePID,
-                bundleID: activeBundleID,
+                pid: targetPID,
+                bundleID: targetBundleID,
                 triggerTimestamp: event.timestamp,
                 proxy: proxy
             )
@@ -296,6 +361,7 @@ public final class TapController: NSObject {
         if !relevant.intersection([.maskCommand, .maskAlternate]).isEmpty {
             ctrlShiftArmed = false
             ctrlShiftDisqualified = true
+            SelectionCacheService.shared.invalidate()
             engine.reset()
             lastReplaceUptimeNs = 0
             return
@@ -307,6 +373,7 @@ public final class TapController: NSObject {
             return
         }
         if relevant.contains(.maskControl) {
+            SelectionCacheService.shared.invalidate()
             engine.reset()
             lastReplaceUptimeNs = 0
         }
@@ -315,7 +382,7 @@ public final class TapController: NSObject {
     private static let navigationKeyCodes: Set<Int> = [
         123, 124, 125, 126,       // arrows
         115, 119, 116, 121,       // home / end / page up / page down
-        117, 53, 48, 36, 76,      // forward delete, escape, tab, return, keypad enter
+        117, 53,                  // forward delete, escape
     ]
 }
 

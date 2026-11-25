@@ -84,6 +84,12 @@ private func keyCodeForASCII(_ ch: Character) -> CGKeyCode {
     case "m": return 46
     case ".": return 47
     case " ": return 49
+    case "?": return 44
+    case "!": return 18
+    case "@": return 19
+    case ":": return 41
+    case "\r", "\n": return 36
+    case "\t": return 48
     default: return 0
     }
 }
@@ -266,7 +272,7 @@ do {
     engine.setMacro("hvbt", value: "nhé bạn")
     engine.setMacro("ddk", value: "đăng ký")
     var cursor = ""
-    for ch in "ddawng ddk hvbt" {
+    for ch in "ddawng ddk hvbt " {
         switch engine.process(ch) {
         case .pass: cursor.append(ch)
         case .replace(let b, let s):
@@ -277,7 +283,7 @@ do {
             cursor.removeLast(b); cursor += s
         }
     }
-    check(cursor, "đăng đăng ký nhé bạn", "macro FFI + telex coexistence")
+    check(cursor, "đăng đăng ký nhé bạn ", "macro FFI + telex coexistence")
 }
 
 // Unikey repeated-key restore via FFI
@@ -425,6 +431,166 @@ do {
         let fnF = makeHardwareKeyEvent("f", keyDown: true, timestamp: 500, flags: .maskSecondaryFn)
         let fnOut = tap.processEventForTesting(type: .keyDown, event: fnF)
         check(fnOut != nil && injectedCount == 0 ? "ok" : "bad", "ok", "Fn+F system shortcut passes through without applying huyền tone")
+    }
+
+    do {
+        let engine = ViEngine(method: .telex, orthography: .modern, allowWAsConsonant: true)
+        engine.setOptions(autoCapitalize: false, repeatedRestore: true, spellCheck: true)
+        let injector = EventInjector(compatFixEnabled: true)
+        let tap = TapController(engine: engine, injector: injector)
+        tap.activeBundleID = "com.tinyspeck.slackmacgap"
+        tap.activePID = 9001
+        tap.isSecureInputActive = false
+
+        var chatBuf = ""
+        injector.eventSink = { item in
+            switch item {
+            case .virtualKey(let kc, true, _, _):
+                if kc == 51 && !chatBuf.isEmpty { chatBuf.removeLast() }
+                if kc == 36 || kc == 76 { chatBuf += "<ENTER>" }
+                if kc == 48 { chatBuf += "<TAB>" }
+            case .unicode(let u, true, _, _):
+                chatBuf += String(decoding: u, as: UTF16.self)
+            default:
+                break
+            }
+        }
+
+        var ts: UInt64 = 10_000
+        for ch in "data" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        injector.clearRecordedClonedKeys()
+        let shiftEnter = makeHardwareKeyEvent("\r", keyDown: true, timestamp: ts, flags: .maskShift)
+        let passedShiftEnter = tap.processEventForTesting(type: .keyDown, event: shiftEnter)
+        check(passedShiftEnter == nil ? "consumed" : "leaked", "consumed", "Shift+Return after incomplete Vietnamese word is serialized")
+        check(chatBuf, "data<ENTER>", "Return triggers word-boundary restoration (dât -> data) before Enter")
+        let downShiftEnter = injector.recordedClonedKeys.first { $0.keyDown }
+        let keptKeyCode36 = downShiftEnter?.keyCode == 36
+        let keptShiftFlag = ((downShiftEnter?.flags ?? 0) & CGEventFlags.maskShift.rawValue) != 0
+        check(keptKeyCode36 && keptShiftFlag ? "ok" : "bad", "ok", "Shift+Return preserves keyCode 36 and .maskShift flag")
+
+        chatBuf = ""
+        for ch in "photo" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        injector.clearRecordedClonedKeys()
+        let src = CGEventSource(stateID: .hidSystemState)
+        let kpEnter = CGEvent(keyboardEventSource: src, virtualKey: 76, keyDown: true)!
+        kpEnter.flags.formUnion(.maskNumericPad)
+        kpEnter.timestamp = ts
+        kpEnter.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x0003])
+        _ = tap.processEventForTesting(type: .keyDown, event: kpEnter)
+        check(chatBuf, "photo<ENTER>", "KeypadEnter (76 + .maskNumericPad) triggers word-boundary restoration")
+        check(injector.recordedClonedKeys.first(where: { $0.keyDown })?.keyCode == 76 ? "ok" : "bad", "ok", "KeypadEnter preserves keyCode 76")
+
+        chatBuf = ""
+        for ch in "raw" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        injector.clearRecordedClonedKeys()
+        let tabEv = makeHardwareKeyEvent("\t", keyDown: true, timestamp: ts)
+        _ = tap.processEventForTesting(type: .keyDown, event: tabEv)
+        check(chatBuf, "raw<TAB>", "Tab triggers word-boundary restoration (ră -> raw)")
+        check(injector.recordedClonedKeys.first(where: { $0.keyDown })?.keyCode == 48 ? "ok" : "bad", "ok", "Tab preserves keyCode 48")
+
+        chatBuf = ""
+        for ch in "nhes" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        injector.clearRecordedClonedKeys()
+        let spaceEv = makeHardwareKeyEvent(" ", keyDown: true, timestamp: ts)
+        _ = tap.processEventForTesting(type: .keyDown, event: spaceEv)
+        let clonedSpace = injector.recordedClonedKeys.first { $0.keyDown }
+        check(clonedSpace?.keyCode == 49 ? "ok" : "bad", "ok", "Post-replace Space preserves physical keyCode 49")
+
+        chatBuf = ""
+        for ch in "ddc" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        injector.clearRecordedClonedKeys()
+        let qEv = makeHardwareKeyEvent("?", keyDown: true, timestamp: ts, flags: .maskShift)
+        if let p = tap.processEventForTesting(type: .keyDown, event: qEv) {
+            chatBuf += p.keyboardString()
+        }
+        check(chatBuf, "đc?", "Vietnamese shorthand đc? in chat")
+        if let clonedQ = injector.recordedClonedKeys.first(where: { $0.keyDown }) {
+            let okQ = clonedQ.keyCode == 44 && (clonedQ.flags & CGEventFlags.maskShift.rawValue) != 0
+            check(okQ ? "ok" : "bad", "ok", "Shifted '?' preserves keyCode 44 and .maskShift")
+        }
+
+        chatBuf = ""
+        for ch in "tieen" {
+            ts += 1_000
+            if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts)) {
+                chatBuf += p.keyboardString()
+            }
+        }
+        ts += 1_000
+        let optBS = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true)!
+        optBS.flags.formUnion(.maskAlternate)
+        optBS.timestamp = ts
+        let optBSOut = tap.processEventForTesting(type: .keyDown, event: optBS)
+        check(optBSOut != nil ? "ok" : "bad", "ok", "Option+Backspace passes through to target app")
+        chatBuf = ""
+        ts += 1_000
+        if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("s", keyDown: true, timestamp: ts)) {
+            chatBuf += p.keyboardString()
+        }
+        check(chatBuf, "s", "Option+Backspace resets engine buffer so 's' does not apply tone to deleted word")
+
+        for ch in "dduow" {
+            ts += 1_000
+            _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts))
+        }
+        ts += 1_000
+        let cmdBS = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true)!
+        cmdBS.flags.formUnion(.maskCommand)
+        cmdBS.timestamp = ts
+        _ = tap.processEventForTesting(type: .keyDown, event: cmdBS)
+        chatBuf = ""
+        ts += 1_000
+        if let p = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent("f", keyDown: true, timestamp: ts)) {
+            chatBuf += p.keyboardString()
+        }
+        check(chatBuf, "f", "Cmd+Backspace resets engine buffer cleanly")
+
+        var sawSpacerInSlack = false
+        var webChatEmitted: [EventInjector.EmittedEvent] = []
+        injector.compatSpacerOverrideForTesting = { _, _ in false }
+        injector.eventSink = { ev in
+            webChatEmitted.append(ev)
+            if case .unicode(let u, true, _, _) = ev, u == [0x202F] {
+                sawSpacerInSlack = true
+            }
+        }
+        tap.activeBundleID = "com.google.Chrome"
+        engine.reset()
+        for ch in "hayx" {
+            ts += 1_000
+            _ = tap.processEventForTesting(type: .keyDown, event: makeHardwareKeyEvent(ch, keyDown: true, timestamp: ts))
+        }
+        check(!sawSpacerInSlack && !webChatEmitted.isEmpty ? "ok" : "bad", "ok", "Browser AXWebArea chat skips U+202F narrow no-break space")
     }
 }
 

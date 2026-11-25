@@ -75,7 +75,7 @@ impl Typer {
 
     /// Synchronize session state when the user presses Backspace.
     pub fn backspace(&mut self) {
-        self.buf.pop_backspace();
+        self.buf.pop_backspace_for(self.cfg.method);
         if self.buf.is_empty() {
             self.macro_eligible = true;
             if self.auto_capitalized_first {
@@ -126,6 +126,23 @@ impl Typer {
         }
 
         if lc.is_ascii_alphabetic() {
+            if self.buf.trailing_apostrophe {
+                self.buf.trailing_apostrophe = false;
+                let displayed = DisplayedSnapshot::capture(&self.buf);
+                self.buf.record_raw(ch);
+                if self.buf.has_any_transform() {
+                    return self.buf.restore_to_raw_from(&displayed, Some(ch));
+                }
+                if self.buf.len() < MAX_WORD_LEN {
+                    self.buf.push(ch);
+                } else {
+                    self.buf.overflow_count += 1;
+                }
+                self.buf.passthrough = true;
+                self.buf.raw_keys = self.buf.chars.iter().map(|c| c.ch).collect();
+                return EngineAction::Pass;
+            }
+
             let mut effective_ch = ch;
             let mut capitalized_first = false;
             if self.cfg.auto_capitalize
@@ -139,38 +156,6 @@ impl Typer {
                 self.auto_capitalized_first = true;
             } else if self.cfg.auto_capitalize && self.sentence_start {
                 self.sentence_start = false;
-            }
-
-            if self.cfg.macro_enabled
-                && self.macro_eligible
-                && !self.buf.passthrough
-                && !self.macros.is_empty()
-            {
-                let mut raw_cand: String = self
-                    .buf
-                    .raw_keys
-                    .iter()
-                    .map(|c| c.to_ascii_lowercase())
-                    .collect();
-                raw_cand.push(lc);
-                if let Some(value) = self.macros.exact(&raw_cand).cloned() {
-                    let first_auto = self.auto_capitalized_first;
-                    let all_upper = !first_auto
-                        && self.buf.raw_keys.len() + 1 >= 2
-                        && self.buf.raw_keys.iter().all(|c| c.is_uppercase())
-                        && ch.is_uppercase();
-                    let expanded = if all_upper {
-                        value.to_uppercase()
-                    } else if first_auto {
-                        capitalize_first_char(&value)
-                    } else {
-                        value
-                    };
-                    let displayed = DisplayedSnapshot::capture(&self.buf);
-                    self.buf.clear();
-                    self.auto_capitalized_first = false;
-                    return displayed.diff_to_str(&expanded, Some(ch));
-                }
             }
 
             let was_non_empty = !self.buf.is_empty();
@@ -210,25 +195,63 @@ impl Typer {
         if lc.is_ascii_digit() || ch == '_' {
             self.macro_eligible = false;
             self.auto_capitalized_first = false;
-            if self.cfg.spell_check {
-                let displayed = DisplayedSnapshot::capture(&self.buf);
-                self.buf.record_raw(ch);
-                if self.buf.has_any_transform() {
-                    return self.buf.restore_to_raw_from(&displayed, Some(ch));
-                }
-                if self.buf.len() < MAX_WORD_LEN {
-                    self.buf.push(ch);
-                } else {
-                    self.buf.overflow_count += 1;
-                }
-                self.buf.passthrough = true;
-                return EngineAction::Pass;
+            self.buf.escaped_double_tone = crate::word::EscapedDoubleTone::None;
+            self.buf.escaped_mark_raw_pending = false;
+            let displayed = DisplayedSnapshot::capture(&self.buf);
+            self.buf.record_raw(ch);
+            if self.cfg.spell_check && self.buf.has_any_transform() {
+                return self.buf.restore_to_raw_from(&displayed, Some(ch));
             }
-            self.buf.clear();
+            if self.buf.len() < MAX_WORD_LEN {
+                self.buf.push(ch);
+            } else {
+                self.buf.overflow_count += 1;
+            }
+            self.buf.passthrough = true;
+            self.buf.raw_keys = self.buf.chars.iter().map(|c| c.ch).collect();
             return EngineAction::Pass;
         }
 
         let had_word = !self.buf.is_empty();
+        if self.buf.trailing_apostrophe {
+            self.buf.clear();
+            self.macro_eligible = ch != '\'';
+            self.auto_capitalized_first = false;
+            return EngineAction::Pass;
+        }
+
+        if self.cfg.macro_enabled
+            && self.macro_eligible
+            && !self.macros.is_empty()
+            && !self.buf.is_empty()
+        {
+            let raw_cand: String = self
+                .buf
+                .raw_keys
+                .iter()
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            if let Some(value) = self.macros.exact(&raw_cand).cloned() {
+                let first_auto = self.auto_capitalized_first;
+                let all_upper = !first_auto
+                    && self.buf.raw_keys.len() >= 2
+                    && self.buf.raw_keys.iter().all(|c| c.is_uppercase());
+                let expanded = if all_upper {
+                    value.to_uppercase()
+                } else if first_auto {
+                    capitalize_first_char(&value)
+                } else {
+                    value
+                };
+                let displayed = DisplayedSnapshot::capture(&self.buf);
+                let target = format!("{expanded}{ch}");
+                self.buf.clear();
+                self.macro_eligible = ch != '\'';
+                self.auto_capitalized_first = false;
+                return displayed.diff_to_str(&target, Some(ch));
+            }
+        }
+
         if self.cfg.spell_check
             && !self.buf.passthrough
             && self.buf.has_any_transform()
@@ -240,6 +263,19 @@ impl Typer {
             self.macro_eligible = ch != '\'' || !had_word;
             self.auto_capitalized_first = false;
             return displayed.diff_to_str(&target, Some(ch));
+        }
+
+        if ch == '\'' && self.cfg.spell_check && had_word {
+            self.buf.record_raw(ch);
+            if self.buf.len() < MAX_WORD_LEN {
+                self.buf.push(ch);
+                self.buf.trailing_apostrophe = true;
+            } else {
+                self.buf.clear();
+            }
+            self.macro_eligible = false;
+            self.auto_capitalized_first = false;
+            return EngineAction::Pass;
         }
 
         self.buf.clear();

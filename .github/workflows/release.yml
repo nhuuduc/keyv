@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.3.2, without leading v)"
+        description: "Release version (e.g. 0.3.3, without leading v)"
         required: false
-        default: "0.3.2"
+        default: "0.3.3"
       publish_release:
         description: "Publish to GitHub Releases (creates tag v<version> if triggered manually)"
         type: boolean
@@ -36,7 +36,7 @@ jobs:
             VERSION="${TAG#v}"
             PUBLISH="true"
           else
-            RAW="${{ inputs.version || '0.3.2' }}"
+            RAW="${{ inputs.version || '0.3.3' }}"
             VERSION="${RAW#v}"
             TAG="v${VERSION}"
             PUBLISH="${{ inputs.publish_release }}"

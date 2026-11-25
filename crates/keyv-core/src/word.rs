@@ -14,7 +14,7 @@
 //!   - Modern (kiểu mới: oà, oẹ, uý) → second vowel
 //! - anything else defaults to the last vowel
 
-use crate::config::Orthography;
+use crate::config::{InputMethod, Orthography};
 use crate::engine::{EngineAction, MAX_WORD_LEN};
 use crate::tables::*;
 
@@ -75,12 +75,24 @@ pub struct Syllable {
     pub coda_start: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EscapedDoubleTone {
+    #[default]
+    None,
+    Pending(char),
+    PendingAfterFE,
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct WordBuffer {
     /// Whether the first displayed horned u came from a standalone w key.
     pub leading_w_expansion: bool,
     pub passthrough: bool,
-    pub escaped_double_tone: bool,
+    pub escaped_double_tone: EscapedDoubleTone,
+    pub escaped_mark_raw_pending: bool,
+    pub escaped_oo: bool,
+    pub stripped_tone_by_z: bool,
+    pub trailing_apostrophe: bool,
     pub overflow_count: usize,
     pub raw_keys: Vec<char>,
     pub chars: Vec<ViChar>,
@@ -168,7 +180,11 @@ impl WordBuffer {
         self.raw_keys.clear();
         self.leading_w_expansion = false;
         self.passthrough = false;
-        self.escaped_double_tone = false;
+        self.escaped_double_tone = EscapedDoubleTone::None;
+        self.escaped_mark_raw_pending = false;
+        self.escaped_oo = false;
+        self.stripped_tone_by_z = false;
+        self.trailing_apostrophe = false;
         self.overflow_count = 0;
     }
     pub fn is_empty(&self) -> bool {
@@ -190,25 +206,90 @@ impl WordBuffer {
         self.raw_keys.push(ch);
     }
     pub fn pop_backspace(&mut self) {
+        self.pop_backspace_for(InputMethod::Telex);
+    }
+    pub fn pop_backspace_for(&mut self, method: InputMethod) {
         if self.overflow_count > 0 {
             self.overflow_count -= 1;
+            self.raw_keys.pop();
             return;
         }
-        self.chars.pop();
-        self.raw_keys.pop();
+        let popped = self.chars.pop();
+        let popped_raw = self.raw_keys.pop();
+        self.escaped_double_tone = EscapedDoubleTone::None;
+        self.escaped_mark_raw_pending = false;
+        self.escaped_oo = false;
+        self.stripped_tone_by_z = false;
+        self.trailing_apostrophe = false;
         if self.chars.is_empty() {
             self.clear();
         } else {
-            if !self.has_any_transform() && self.raw_keys.len() != self.chars.len() {
+            let needs_resync = match (popped, popped_raw) {
+                (Some(vc), Some(rk)) => vc.has_mark_or_tone() || vc.ch != rk,
+                _ => true,
+            };
+            if self.passthrough {
                 self.raw_keys = self.chars.iter().map(|c| c.ch).collect();
+            } else if needs_resync
+                || (!self.has_any_transform() && self.raw_keys.len() != self.chars.len())
+            {
+                self.sync_raw_keys_from_chars(method);
             }
             if self.passthrough && self.is_valid_vietnamese() {
-                self.passthrough = false;
+                let syl = self.analyze();
+                let lcs: Vec<char> = self.chars.iter().map(ViChar::base_lc).collect();
+                let is_plain_oo = syl.nucleus.len() == 2
+                    && lcs[syl.nucleus[0]] == 'o'
+                    && lcs[syl.nucleus[1]] == 'o'
+                    && !self.chars[syl.nucleus[0]].hat
+                    && !self.chars[syl.nucleus[1]].hat;
+                if syl.nucleus.is_empty() {
+                    if is_valid_vi_initial(&lcs[..syl.initial_end], self.chars[0].stroke) {
+                        self.passthrough = false;
+                    }
+                } else if !is_plain_oo {
+                    self.passthrough = false;
+                }
             }
         }
     }
+    pub fn sync_raw_keys_from_chars(&mut self, method: InputMethod) {
+        let mut out = Vec::with_capacity(self.chars.len() + 2);
+        let is_vni = matches!(method, InputMethod::Vni);
+        for (idx, vc) in self.chars.iter().enumerate() {
+            if idx == 0 && self.leading_w_expansion && vc.base_lc() == 'u' && vc.horn {
+                out.push(if vc.is_upper() { 'W' } else { 'w' });
+            } else {
+                out.push(vc.ch);
+                if vc.stroke {
+                    out.push(if is_vni { '9' } else { 'd' });
+                }
+                if vc.hat && !vc.implicit_hat {
+                    out.push(if is_vni { '6' } else { vc.base_lc() });
+                }
+                if vc.brev {
+                    out.push(if is_vni { '8' } else { 'w' });
+                }
+                if vc.horn && !vc.implicit_horn {
+                    out.push(if is_vni { '7' } else { 'w' });
+                }
+            }
+            match vc.tone {
+                Tone::None => {}
+                Tone::Sac => out.push(if is_vni { '1' } else { 's' }),
+                Tone::Huyen => out.push(if is_vni { '2' } else { 'f' }),
+                Tone::Hoi => out.push(if is_vni { '3' } else { 'r' }),
+                Tone::Nga => out.push(if is_vni { '4' } else { 'x' }),
+                Tone::Nang => out.push(if is_vni { '5' } else { 'j' }),
+            }
+        }
+        self.raw_keys = out;
+    }
     pub fn has_any_transform(&self) -> bool {
-        self.leading_w_expansion || self.chars.iter().any(ViChar::has_mark_or_tone)
+        if self.leading_w_expansion || self.chars.iter().any(ViChar::has_mark_or_tone) {
+            return true;
+        }
+        !self.passthrough && self.chars.len() != self.raw_keys.len()
     }
     pub fn has_explicit_mark(&self) -> bool {
         self.leading_w_expansion
@@ -372,12 +453,23 @@ impl WordBuffer {
         }
         let syl = self.analyze();
         let lcs: Vec<char> = self.chars.iter().map(|c| c.base_lc()).collect();
+        if syl.nucleus.is_empty() {
+            return lcs.iter().all(|c| c.is_ascii_alphabetic());
+        }
         let initial = &lcs[..syl.initial_end];
         let stroke_first = self.chars[0].stroke;
         if syl.initial_end > 1 && self.chars[1..syl.initial_end].iter().any(|c| c.stroke) {
             return false;
         }
         if !is_valid_vi_initial(initial, stroke_first) {
+            return false;
+        }
+        if initial == ['p']
+            && self
+                .chars
+                .iter()
+                .any(|c| c.tone != Tone::None || c.brev || (c.horn && c.base_lc() == 'u'))
+        {
             return false;
         }
         if initial == ['q'] && !syl.nucleus.is_empty() && lcs[syl.nucleus[0]] != 'u' {
@@ -427,7 +519,8 @@ impl WordBuffer {
         if !is_valid_vi_coda(coda) {
             return false;
         }
-        if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t'])
+        if !self.has_explicit_mark()
+            && matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t'])
             && self
                 .chars
                 .iter()
@@ -447,14 +540,55 @@ impl WordBuffer {
         if groups.len() != syl.nucleus.len() {
             return false;
         }
-        if initial == ['q', 'u'] && matches!(groups.as_slice(), [VG::E, VG::U] | [VG::Ehat, VG::U])
+        if initial == ['q', 'u']
+            && matches!(
+                groups.as_slice(),
+                [VG::I, VG::E] | [VG::I, VG::Ehat] | [VG::I, VG::A]
+            )
         {
+            return false;
+        }
+        if initial == ['g'] && groups.starts_with(&[VG::U, VG::Y]) {
             return false;
         }
 
         let has_coda = !coda.is_empty();
+        if initial == ['b']
+            && !has_coda
+            && groups.as_slice() == [VG::U, VG::Y]
+            && self.chars.iter().any(|c| c.tone != Tone::None)
+        {
+            return false;
+        }
         match groups.as_slice() {
             [] => !has_coda,
+            [VG::Y] => {
+                if has_coda {
+                    initial == ['q', 'u']
+                        && matches!(
+                            coda,
+                            ['c'] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['p'] | ['t']
+                        )
+                } else {
+                    (stroke_first && initial == ['d'])
+                        || (!stroke_first
+                            && matches!(
+                                initial,
+                                [] | ['h']
+                                    | ['k']
+                                    | ['l']
+                                    | ['m']
+                                    | ['n']
+                                    | ['q', 'u']
+                                    | ['s']
+                                    | ['t']
+                                    | ['t', 'h']
+                                    | ['t', 'r']
+                                    | ['v']
+                                    | ['x']
+                            ))
+                }
+            }
             [g] => !(*g == VG::Abrev && matches!(coda, ['c', 'h'] | ['n', 'h'])),
             [a, b] => match (*a, *b) {
                 (VG::A, VG::I)
@@ -469,7 +603,6 @@ impl WordBuffer {
                 | (VG::I, VG::A)
                 | (VG::I, VG::U)
                 | (VG::O, VG::I)
-                | (VG::O, VG::Y)
                 | (VG::Ohat, VG::I)
                 | (VG::Ohorn, VG::I)
                 | (VG::U, VG::I)
@@ -482,19 +615,37 @@ impl WordBuffer {
                     matches!(coda, [] | ['m'] | ['n'] | ['n', 'g'] | ['t'])
                 }
                 (VG::O, VG::A) | (VG::O, VG::Abrev) => true,
-                (VG::O, VG::E) => matches!(coda, [] | ['n'] | ['t']),
-                (VG::O, VG::O) => matches!(coda, [] | ['c'] | ['n', 'g']),
+                (VG::O, VG::E) => {
+                    !stroke_first
+                        && matches!(
+                            initial,
+                            [] | ['c', 'h']
+                                | ['h']
+                                | ['k', 'h']
+                                | ['l']
+                                | ['n', 'g']
+                                | ['n', 'h']
+                                | ['t']
+                                | ['t', 'h']
+                                | ['x']
+                        )
+                        && matches!(coda, [] | ['m'] | ['n'] | ['t'])
+                }
+                (VG::O, VG::O) => matches!(coda, [] | ['c'] | ['n'] | ['n', 'g']),
                 (VG::U, VG::A) | (VG::U, VG::Ahat) => !matches!(coda, ['c', 'h'] | ['n', 'h']),
                 (VG::U, VG::E) | (VG::U, VG::Ehat) => {
-                    matches!(coda, [] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['t'])
+                    matches!(coda, [] | ['c'] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['t'])
                 }
-                (VG::Uhorn, VG::O) => !has_coda,
+                (VG::Uhorn, VG::O) => !matches!(coda, ['c', 'h'] | ['n', 'h']),
                 (VG::U, VG::O)
                 | (VG::U, VG::Ohat)
                 | (VG::U, VG::Ohorn)
                 | (VG::Uhorn, VG::Ohorn) => !matches!(coda, ['c', 'h'] | ['n', 'h']),
                 (VG::U, VG::Y) => {
-                    matches!(coda, [] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['p'] | ['t'])
+                    matches!(
+                        coda,
+                        [] | ['c'] | ['c', 'h'] | ['n'] | ['n', 'h'] | ['p'] | ['t']
+                    )
                 }
                 _ => false,
             },
@@ -502,10 +653,24 @@ impl WordBuffer {
                 (VG::U, VG::Y, VG::E) | (VG::U, VG::Y, VG::Ehat) => {
                     matches!(coda, [] | ['n'] | ['t'])
                 }
+                (VG::O, VG::E, VG::O) => {
+                    !stroke_first
+                        && matches!(
+                            initial,
+                            [] | ['c', 'h']
+                                | ['h']
+                                | ['k', 'h']
+                                | ['l']
+                                | ['n', 'g']
+                                | ['n', 'h']
+                                | ['t']
+                                | ['x']
+                        )
+                        && !has_coda
+                }
                 (VG::O, VG::A, VG::I)
                 | (VG::O, VG::A, VG::O)
                 | (VG::O, VG::A, VG::Y)
-                | (VG::O, VG::E, VG::O)
                 | (VG::U, VG::A, VG::Y)
                 | (VG::U, VG::Ahat, VG::Y)
                 | (VG::U, VG::Y, VG::A)
@@ -534,7 +699,11 @@ impl WordBuffer {
             return false;
         }
         let syl = self.analyze();
+        if syl.nucleus.is_empty() {
+            return true;
+        }
         let lcs: Vec<char> = self.chars.iter().map(ViChar::base_lc).collect();
+        let initial = &lcs[..syl.initial_end];
         let coda = &lcs[syl.coda_start..];
         if matches!(coda, ['c'] | ['c', 'h'] | ['p'] | ['t'])
             && !self
@@ -553,14 +722,61 @@ impl WordBuffer {
             })
             .collect();
         let has_coda = !coda.is_empty();
-        if matches!(groups.as_slice(), [VG::Uhorn, VG::O]) {
+        if initial == ['p']
+            && ((has_coda && !(groups.as_slice() == [VG::I] && coda == ['n']))
+                || groups.as_slice() == [VG::Ahat])
+        {
+            return false;
+        }
+        if initial == ['b'] && groups.as_slice() == [VG::U, VG::Y] && coda != ['t'] {
+            return false;
+        }
+        if initial == ['t', 'h'] && groups.as_slice() == [VG::O, VG::E] && coda != ['t'] {
+            return false;
+        }
+        if initial == ['q', 'u'] && groups.as_slice() == [VG::O] {
+            return false;
+        }
+        if initial == ['q', 'u'] && has_coda && groups.as_slice() == [VG::Y] && coda == ['c'] {
+            return false;
+        }
+        if matches!(groups.as_slice(), [VG::U, VG::Ehat] | [VG::U, VG::Y]) && coda == ['c'] {
+            return false;
+        }
+        if groups.as_slice() == [VG::O, VG::O] && !matches!(coda, ['c'] | ['n', 'g']) {
+            return false;
+        }
+        if has_coda && groups.as_slice() == [VG::U, VG::A] {
+            return false;
+        }
+        if matches!(
+            groups.as_slice(),
+            [VG::U, VG::U]
+                | [VG::E, VG::U]
+                | [VG::U, VG::O]
+                | [VG::Uhorn, VG::O]
+                | [VG::I, VG::E]
+                | [VG::Y, VG::E]
+                | [VG::U, VG::E]
+                | [VG::U, VG::Y, VG::E]
+                | [VG::I, VG::E, VG::U]
+                | [VG::Y, VG::E, VG::U]
+                | [VG::U, VG::O, VG::I]
+                | [VG::U, VG::Ohorn, VG::I]
+                | [VG::Uhorn, VG::O, VG::I]
+                | [VG::U, VG::O, VG::U]
+                | [VG::U, VG::Ohorn, VG::U]
+                | [VG::Uhorn, VG::O, VG::U]
+                | [VG::U, VG::A, VG::Y]
+        ) {
             return false;
         }
         if !has_coda
-            && matches!(
+            && (matches!(
                 groups.as_slice(),
-                [VG::Abrev] | [VG::O, VG::Abrev] | [VG::I, VG::E] | [VG::Y, VG::E] | [VG::U, VG::E]
-            )
+                [VG::Abrev] | [VG::O, VG::Abrev] | [VG::O, VG::Ahat] | [VG::U, VG::Ahat]
+            ) || (groups.as_slice() == [VG::Ahat]
+                && (!initial.is_empty() || self.chars[0].tone != Tone::None)))
         {
             return false;
         }
@@ -577,6 +793,11 @@ impl WordBuffer {
             .collect();
         self.leading_w_expansion = false;
         self.passthrough = true;
+        self.escaped_double_tone = EscapedDoubleTone::None;
+        self.escaped_mark_raw_pending = false;
+        self.escaped_oo = false;
+        self.stripped_tone_by_z = false;
+        self.trailing_apostrophe = false;
         diff_action(displayed_before_push, &target)
     }
 
@@ -594,7 +815,11 @@ impl WordBuffer {
             .collect();
         self.leading_w_expansion = false;
         self.passthrough = true;
-        self.escaped_double_tone = false;
+        self.escaped_double_tone = EscapedDoubleTone::None;
+        self.escaped_mark_raw_pending = false;
+        self.escaped_oo = false;
+        self.stripped_tone_by_z = false;
+        self.trailing_apostrophe = false;
         displayed.diff_to_str(&target, passthrough_key)
     }
 }
@@ -647,6 +872,12 @@ pub fn apply_tone(
         buf.push(fallback_char);
         return EngineAction::Pass;
     }
+    if buf.escaped_oo && syl.coda_start == buf.len() {
+        buf.push(fallback_char);
+        buf.passthrough = true;
+        buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
+        return EngineAction::Pass;
+    }
     let idx = tone_target(&buf.chars, &syl, orth).expect("nucleus non-empty implies a target");
     if implicit_closing_hat(&buf.chars, &syl, idx) {
         buf.chars[idx].hat = true;
@@ -671,6 +902,16 @@ pub fn rebalance_after_push(buf: &mut WordBuffer, orth: Orthography) -> EngineAc
             buf.chars[u_idx].horn = true;
             buf.chars[u_idx].implicit_horn = true;
             earliest_change = Some(u_idx);
+        } else if buf.chars[u_idx].base_lc() == 'u'
+            && buf.chars[u_idx].horn
+            && buf.chars[o_idx].base_lc() == 'o'
+            && !buf.chars[o_idx].horn
+            && !buf.chars[o_idx].hat
+            && (syl.nucleus.len() > 2 || buf.len() > o_idx + 1)
+        {
+            buf.chars[o_idx].horn = true;
+            buf.chars[o_idx].implicit_horn = true;
+            earliest_change = Some(o_idx);
         }
     }
 
@@ -758,6 +999,20 @@ pub fn apply_uo_or_single_horn(buf: &mut WordBuffer, syl: &Syllable, target_idx:
 /// follows the nucleus.
 fn implicit_closing_hat(chars: &[ViChar], syl: &Syllable, idx: usize) -> bool {
     let k = syl.nucleus.len();
+    if k == 1
+        && idx == syl.nucleus[0]
+        && syl.initial_end == 2
+        && chars[0].base_lc() == 'q'
+        && chars[1].base_lc() == 'u'
+        && chars[idx].base_lc() == 'o'
+        && !chars[idx].hat
+        && !chars[idx].horn
+        && !chars[idx].brev
+        && chars.len() == idx + 2
+        && chars[idx + 1].base_lc() == 'c'
+    {
+        return true;
+    }
     if k < 2 || idx != syl.nucleus[k - 1] {
         return false;
     }
@@ -768,7 +1023,7 @@ fn implicit_closing_hat(chars: &[ViChar], syl: &Syllable, idx: usize) -> bool {
     }
     let a = canon_of(prev.base_lc());
     let b = canon_of(curr.base_lc());
-    if !matches!((a, b), ('u', 'o') | ('i', 'e')) {
+    if !matches!((a, b), ('u', 'o') | ('i', 'e') | ('y', 'e')) {
         return false;
     }
     chars.len() > idx + 1
@@ -810,6 +1065,9 @@ pub fn tone_target(chars: &[ViChar], syl: &Syllable, orth: Orthography) -> Optio
             }
 
             if k >= 3 {
+                if k == 3 && chars.len() > syl.nucleus[2] + 1 {
+                    return Some(syl.nucleus[2]);
+                }
                 return Some(syl.nucleus[1]);
             }
 
