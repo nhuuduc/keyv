@@ -1,20 +1,31 @@
 import AppKit
 import KeyVCore
 import ApplicationServices
+import Darwin
 
 /// Realizes engine actions on screen via serialized session events.
-final class EventInjector {
-    static let syntheticMarker: Int64 = 0x4B65_7956_4556
+public final class EventInjector {
+    public static let syntheticMarker: Int64 = 0x4B65_7956_4556
+    public static let autocompleteSpacerScalar: UnicodeScalar = "\u{202F}"
+
+    public enum EmittedEvent: Equatable {
+        case virtualKey(keyCode: CGKeyCode, keyDown: Bool, flags: UInt64, timestamp: UInt64)
+        case unicode(units: [UniChar], keyDown: Bool, flags: UInt64, timestamp: UInt64)
+    }
 
     /// Synthetic events carry our own private source and marker so the tap can
     /// pass them through deterministically without feedback loops.
     private let syntheticSource = CGEventSource(stateID: .privateState)
 
-    private let selectionCache = SelectionCacheService.shared
     private let backspaceKeyCode: CGKeyCode = 51
-    private let maxUnicodeChunkUTF16 = 16
+    private let returnKeyCode: CGKeyCode = 36
+    private let tabKeyCode: CGKeyCode = 48
+    private var lastTimestamp: CGEventTimestamp = 0
 
-    private static let compatBundleIDs: Set<String> = [
+    public var compatFixEnabled: Bool = true
+    public var eventSink: ((EmittedEvent) -> Void)?
+
+    public static let compatBundleIDs: Set<String> = [
         "com.google.Chrome",
         "company.thebrowser.Browser",   // Arc
         "com.brave.Browser",
@@ -25,12 +36,10 @@ final class EventInjector {
         "app.zen-browser.zen",
         "com.apple.Safari",
         "org.mozilla.firefox",
-        "app.notion.Notion",
-        "figma.desktop",
         "com.microsoft.Excel",
     ]
 
-    private static let terminalBundleIDs: Set<String> = [
+    public static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
         "com.mitchellh.ghostty",
@@ -41,14 +50,35 @@ final class EventInjector {
         "co.zeit.hyper",
     ]
 
-    func realize(_ action: ViEngineAction, pid: pid_t, bundleID: String?, proxy: CGEventTapProxy? = nil) {
+    private static let strippedModifiers: CGEventFlags = [
+        .maskShift,
+        .maskControl,
+        .maskAlternate,
+        .maskCommand,
+        .maskAlphaShift,
+        .maskSecondaryFn,
+        .maskNumericPad,
+        .maskHelp,
+    ]
+
+    public init(compatFixEnabled: Bool = AppSettings.shared.compatFix) {
+        self.compatFixEnabled = compatFixEnabled
+    }
+
+    public func realize(
+        _ action: ViEngineAction,
+        pid: pid_t,
+        bundleID: String?,
+        triggerTimestamp: CGEventTimestamp = 0,
+        proxy: CGEventTapProxy? = nil
+    ) {
         switch action {
         case .pass:
             break
         case .replace(let backspaces, let chars):
             guard backspaces > 0 else {
                 if !chars.isEmpty {
-                    postUnicode(chars, proxy: proxy)
+                    postUnicode(chars, minimumTimestamp: triggerTimestamp, proxy: proxy)
                 }
                 return
             }
@@ -57,72 +87,87 @@ final class EventInjector {
             let bundle = bundleID ?? ""
             let isTerminal = Self.terminalBundleIDs.contains(bundle)
             let isCompat = !isTerminal
-                && AppSettings.shared.compatFix
+                && compatFixEnabled
                 && Self.compatBundleIDs.contains(bundle)
 
             if isCompat {
-                let knownSelection = selectionCache.cachedSelectionCount(bundleID: bundleID)
-                if let sel = knownSelection {
-                    if sel > 0 {
-                        deleteCount += 1
-                    }
-                } else {
-                    postUnicode("\u{200C}", proxy: proxy)
-                    deleteCount += 1
-                }
-            } else if !isTerminal, let sel = selectionCache.cachedSelectionCount(bundleID: bundleID), sel > 0 {
+                postUnicode(String(Self.autocompleteSpacerScalar), minimumTimestamp: triggerTimestamp, proxy: proxy)
                 deleteCount += 1
             }
 
-            postBackspaces(deleteCount, proxy: proxy)
+            postBackspaces(deleteCount, minimumTimestamp: triggerTimestamp, proxy: proxy)
             if !chars.isEmpty {
-                postUnicode(chars, proxy: proxy)
+                postUnicode(chars, minimumTimestamp: triggerTimestamp, proxy: proxy)
             }
         }
+    }
+
+    public func postPassthroughCharacter(
+        _ ch: Character,
+        triggerTimestamp: CGEventTimestamp = 0,
+        proxy: CGEventTapProxy? = nil
+    ) {
+        postUnicode(String(ch), minimumTimestamp: triggerTimestamp, proxy: proxy)
     }
 
     // MARK: - Event posting
 
-    private func postBackspaces(_ count: Int, proxy: CGEventTapProxy?) {
+    private func postBackspaces(_ count: Int, minimumTimestamp: CGEventTimestamp, proxy: CGEventTapProxy?) {
         guard count > 0 else { return }
         for _ in 0..<count {
-            guard let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: backspaceKeyCode, keyDown: true),
-                  let keyUp = CGEvent(keyboardEventSource: syntheticSource, virtualKey: backspaceKeyCode, keyDown: false)
-            else { continue }
-            stamp(keyDown)
-            stamp(keyUp)
-            post(keyDown, proxy: proxy)
-            post(keyUp, proxy: proxy)
+            postVirtualKey(backspaceKeyCode, minimumTimestamp: minimumTimestamp, proxy: proxy)
         }
     }
 
-    private func postUnicode(_ string: String, proxy: CGEventTapProxy?) {
+    private func postVirtualKey(_ keyCode: CGKeyCode, minimumTimestamp: CGEventTimestamp, proxy: CGEventTapProxy?) {
+        guard let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: syntheticSource, virtualKey: keyCode, keyDown: false)
+        else { return }
+        let downTS = nextTimestamp(minimum: minimumTimestamp)
+        let upTS = nextTimestamp(minimum: downTS)
+        stamp(keyDown, timestamp: downTS)
+        stamp(keyUp, timestamp: upTS)
+        if let eventSink {
+            eventSink(.virtualKey(keyCode: keyCode, keyDown: true, flags: keyDown.flags.rawValue, timestamp: downTS))
+            eventSink(.virtualKey(keyCode: keyCode, keyDown: false, flags: keyUp.flags.rawValue, timestamp: upTS))
+            return
+        }
+        post(keyDown, proxy: proxy)
+        post(keyUp, proxy: proxy)
+    }
+
+    private func postUnicode(_ string: String, minimumTimestamp: CGEventTimestamp, proxy: CGEventTapProxy?) {
         guard !string.isEmpty else { return }
-        var chunk: [UniChar] = []
-        chunk.reserveCapacity(maxUnicodeChunkUTF16)
-
         for ch in string {
-            let units = Array(String(ch).utf16)
-            if !chunk.isEmpty && chunk.count + units.count > maxUnicodeChunkUTF16 {
-                postUnicodeChunk(chunk, proxy: proxy)
-                chunk.removeAll(keepingCapacity: true)
+            if ch == "\n" || ch == "\r" {
+                postVirtualKey(returnKeyCode, minimumTimestamp: minimumTimestamp, proxy: proxy)
+                continue
             }
-            chunk.append(contentsOf: units)
-        }
-        if !chunk.isEmpty {
-            postUnicodeChunk(chunk, proxy: proxy)
+            if ch == "\t" {
+                postVirtualKey(tabKeyCode, minimumTimestamp: minimumTimestamp, proxy: proxy)
+                continue
+            }
+            let units = Array(String(ch).utf16)
+            postSingleCharacter(units, minimumTimestamp: minimumTimestamp, proxy: proxy)
         }
     }
 
-    private func postUnicodeChunk(_ utf16Units: [UniChar], proxy: CGEventTapProxy?) {
+    private func postSingleCharacter(_ utf16Units: [UniChar], minimumTimestamp: CGEventTimestamp, proxy: CGEventTapProxy?) {
         guard !utf16Units.isEmpty,
               let keyDown = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 0, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: syntheticSource, virtualKey: 0, keyDown: false)
         else { return }
-        stamp(keyDown)
-        stamp(keyUp)
+        let downTS = nextTimestamp(minimum: minimumTimestamp)
+        let upTS = nextTimestamp(minimum: downTS)
+        stamp(keyDown, timestamp: downTS)
+        stamp(keyUp, timestamp: upTS)
         keyDown.keyboardSetUnicodeString(stringLength: CFIndex(utf16Units.count), unicodeString: utf16Units)
         keyUp.keyboardSetUnicodeString(stringLength: CFIndex(utf16Units.count), unicodeString: utf16Units)
+        if let eventSink {
+            eventSink(.unicode(units: utf16Units, keyDown: true, flags: keyDown.flags.rawValue, timestamp: downTS))
+            eventSink(.unicode(units: utf16Units, keyDown: false, flags: keyUp.flags.rawValue, timestamp: upTS))
+            return
+        }
         post(keyDown, proxy: proxy)
         post(keyUp, proxy: proxy)
     }
@@ -135,8 +180,17 @@ final class EventInjector {
         }
     }
 
-    private func stamp(_ event: CGEvent) {
-        event.flags = .maskNonCoalesced
+    private func nextTimestamp(minimum: CGEventTimestamp) -> CGEventTimestamp {
+        let now = mach_absolute_time()
+        let base = max(now, minimum)
+        let candidate = base > lastTimestamp ? base : (lastTimestamp &+ 1_000)
+        lastTimestamp = candidate
+        return candidate
+    }
+
+    private func stamp(_ event: CGEvent, timestamp: CGEventTimestamp) {
+        event.flags.subtract(Self.strippedModifiers)
+        event.timestamp = timestamp
         event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
     }
 }

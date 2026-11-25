@@ -57,6 +57,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: ViEngine!
     private var tap: TapController!
     private var capture: ClipboardCaptureService!
+    private var activeBundleID: String?
+    private var activePID: pid_t = 0
+    private var macrosLoaded = false
+    private var installedOverlayHotKeyCode: Int?
+    private var installedOverlayHotKeyModifiers: UInt?
+    private var installedToggleHotKeyCode: Int?
+    private var installedToggleHotKeyModifiers: UInt?
 
     private var statusItem: NSStatusItem!
     private var typingMenuItem: NSMenuItem?
@@ -83,8 +90,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = AppSettings.shared
-        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let effective = settings.effectiveFor(bundleID: frontBundle)
+        if Bundle.main.bundleIdentifier == "app.keyv.host" {
+            settings.migrateLegacyDefaultsIfNeeded()
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        activeBundleID = front?.bundleIdentifier
+        activePID = front?.processIdentifier ?? 0
+        let effective = settings.effectiveFor(bundleID: activeBundleID)
         engine = ViEngine(method: effective.method,
                           orthography: effective.orthography,
                           macroEnabled: settings.macroEnabled,
@@ -152,6 +164,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installTypingPipeline() {
         guard tap == nil else { return }
         let candidate = TapController(engine: engine, injector: EventInjector())
+        candidate.activeBundleID = activeBundleID
+        candidate.activePID = activePID
         candidate.onModeToggleShortcut = { [weak self] in
             Task { @MainActor in
                 self?.toggleTyping()
@@ -197,6 +211,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         installTypingPipeline()
+        tap?.refreshSecureInputState()
         refreshMenuBar()
     }
 
@@ -291,7 +306,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func typingStatusTitle() -> String {
-        let current = AppSettings.shared.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let current = AppSettings.shared.effectiveFor(bundleID: activeBundleID)
         guard tap != nil else { return "Chế độ: Chưa cấp quyền Trợ năng…" }
         if current.method == .off {
             return "Chế độ: English"
@@ -300,7 +315,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func menuBarLetter() -> String {
-        let current = AppSettings.shared.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let current = AppSettings.shared.effectiveFor(bundleID: activeBundleID)
         guard tap != nil else { return "!" }
         return current.method == .off ? "E" : "V"
     }
@@ -403,7 +418,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshMenuBar() {
         let settings = AppSettings.shared
-        let current = settings.effectiveFor(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let current = settings.effectiveFor(bundleID: activeBundleID)
         let isWarning = (tap == nil)
         let isVietnamese = !isWarning && current.method != .off
         let hasUpdate = (UpdateService.shared.availableUpdate != nil)
@@ -487,8 +502,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc fileprivate func toggleTyping() {
         guard tap != nil else { showOnboarding(); return }
         let settings = AppSettings.shared
-        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        if let frontBundle, var override = settings.appOverridesJSON[frontBundle], override.useMode != nil {
+        if let frontBundle = activeBundleID, var override = settings.appOverridesJSON[frontBundle], override.useMode != nil {
             let nextMode: ViInputMethod = override.useMode == .off ? settings.lastVietnameseMethod : .off
             override.useModeRaw = nextMode.rawValue
             var all = settings.appOverridesJSON
@@ -539,33 +553,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func engineSettingsChanged(_ note: Notification) {
         let settings = AppSettings.shared
-        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let effective = settings.effectiveFor(bundleID: frontBundle)
-        engine = ViEngine(method: effective.method, orthography: effective.orthography,
-                          macroEnabled: settings.macroEnabled, allowWAsConsonant: settings.allowWAsConsonant)
+        let effective = settings.effectiveFor(bundleID: activeBundleID)
+        engine.setMethod(effective.method)
+        engine.setOrthography(effective.orthography)
+        engine.setAllowWAsConsonant(settings.allowWAsConsonant)
+        engine.setMacroEnabled(settings.macroEnabled)
         engine.setOptions(autoCapitalize: settings.autoCapitalize,
                           repeatedRestore: settings.repeatedRestore,
                           spellCheck: settings.spellCheck)
-        loadMacroFile()
-        tap?.engine = engine
+        if settings.macroEnabled && !macrosLoaded {
+            loadMacroFile()
+        }
+        tap?.refreshCachedSettings()
         refreshMenuBar()
-        reRegisterGlobalHotKeys()
+        reRegisterGlobalHotKeysIfNeeded()
     }
 
     @objc private func appActivated(_ note: Notification) {
-        SelectionCacheService.shared.invalidate()
-
-        let front = NSWorkspace.shared.frontmostApplication
-        tap?.activeBundleID = front?.bundleIdentifier
-        tap?.activePID = front?.processIdentifier ?? 0
+        let front = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+            ?? NSWorkspace.shared.frontmostApplication
+        activeBundleID = front?.bundleIdentifier
+        activePID = front?.processIdentifier ?? 0
+        tap?.handleApplicationActivated(bundleID: activeBundleID, pid: activePID)
 
         if let front, front.bundleIdentifier != Bundle.main.bundleIdentifier {
             let name = front.localizedName ?? front.bundleIdentifier ?? "?"
             AppSettings.shared.noteSeenApp(bundleID: front.bundleIdentifier ?? "?", name: name)
         }
 
-        let bundleID = front?.bundleIdentifier
-        let effective = AppSettings.shared.effectiveFor(bundleID: bundleID)
+        let effective = AppSettings.shared.effectiveFor(bundleID: activeBundleID)
         engine.setMethod(effective.method)
         engine.setOrthography(effective.orthography)
         refreshMenuBar()
@@ -574,7 +590,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Macros (gõ tắt)
 
     @objc private func macroFileReloaded() {
-        engineSettingsChanged(Notification(name: Notification.Name("KeyVSavedMacroFile")))
+        let settings = AppSettings.shared
+        let effective = settings.effectiveFor(bundleID: activeBundleID)
+        engine = ViEngine(method: effective.method,
+                          orthography: effective.orthography,
+                          macroEnabled: settings.macroEnabled,
+                          allowWAsConsonant: settings.allowWAsConsonant)
+        engine.setOptions(autoCapitalize: settings.autoCapitalize,
+                          repeatedRestore: settings.repeatedRestore,
+                          spellCheck: settings.spellCheck)
+        macrosLoaded = false
+        loadMacroFile()
+        tap?.engine = engine
     }
 
     private func loadMacroFile() {
@@ -586,6 +613,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard parts.count == 2 else { continue }
             engine.setMacro(String(parts[0]), value: String(parts[1]))
         }
+        macrosLoaded = true
     }
 
     // MARK: - Global hotkeys (Carbon)
@@ -606,6 +634,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         reRegisterGlobalHotKeys()
     }
 
+    private func reRegisterGlobalHotKeysIfNeeded() {
+        let settings = AppSettings.shared
+        guard installedOverlayHotKeyCode != settings.overlayHotKeyCode
+            || installedOverlayHotKeyModifiers != settings.overlayHotKeyModifiers
+            || installedToggleHotKeyCode != settings.toggleHotKeyCode
+            || installedToggleHotKeyModifiers != settings.toggleHotKeyModifiers
+        else { return }
+        reRegisterGlobalHotKeys()
+    }
+
     private func reRegisterGlobalHotKeys() {
         if let ref = overlayHotKeyRef {
             UnregisterEventHotKey(ref)
@@ -616,6 +654,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             toggleHotKeyRef = nil
         }
         let settings = AppSettings.shared
+        installedOverlayHotKeyCode = settings.overlayHotKeyCode
+        installedOverlayHotKeyModifiers = settings.overlayHotKeyModifiers
+        installedToggleHotKeyCode = settings.toggleHotKeyCode
+        installedToggleHotKeyModifiers = settings.toggleHotKeyModifiers
         let overlayID = EventHotKeyID(signature: OSType(0x4B655944), id: 1)
         _ = RegisterEventHotKey(UInt32(settings.overlayHotKeyCode),
                                 UInt32(settings.overlayHotKeyModifiers),

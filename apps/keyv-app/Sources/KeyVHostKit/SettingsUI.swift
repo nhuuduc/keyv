@@ -298,7 +298,7 @@ private struct SettingsEngineTab: View {
 
                         settingToggleRow(
                             title: "Giữ phím W đầu từ làm phụ âm",
-                            subtitle: "Cho phép gõ tự nhiên các từ bắt đầu bằng W (như Web, Windows, Swift) mà không đổi thành ư.",
+                            subtitle: "Cho phép gõ tự nhiên phím W và các từ tiếng Anh (như Web, Wifi, Windows, Work) mà không đổi thành ư.",
                             isOn: $model.allowWAsConsonant
                         )
                     }
@@ -326,13 +326,20 @@ private struct SettingsEngineTab: View {
                         )
 
                         settingToggleRow(
-                            title: "Tương thích gợi ý tự động (Trình duyệt, Excel, IDE…)",
+                            title: "Tương thích gợi ý tự động (Trình duyệt, Excel…)",
                             subtitle: "Khắc phục hiện tượng nuốt chữ hoặc lặp ký tự trên thanh địa chỉ trình duyệt và ô nhập có autocomplete.",
                             isOn: $model.compatFix
                         )
                     }
                     .padding(6)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Khôi phục mặc định chuẩn (UniKey)") {
+                        model.resetEngineDefaults()
+                    }
                 }
             }
             .padding(10)
@@ -1046,6 +1053,10 @@ public final class SettingsModel: NSObject, ObservableObject {
         overlayHotKeyCode = s.overlayHotKeyCode
         overlayHotKeyModifierMask = s.overlayHotKeyModifiers
         rebuildRows()
+    }
+
+    public func resetEngineDefaults() {
+        AppSettings.shared.resetEngineDefaults()
     }
 
     func reloadMacros() {

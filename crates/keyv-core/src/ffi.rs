@@ -153,6 +153,35 @@ pub unsafe extern "C" fn keyv_typer_set_options(typer: *mut KeyVTyper, flags: i3
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn keyv_typer_set_allow_w_consonant(
+    typer: *mut KeyVTyper,
+    allow_w_consonant: i32,
+) {
+    if let Some(t) = unsafe { typer.as_mut() } {
+        let mut cfg = t.typer.config().clone();
+        cfg.allow_w_consonant = allow_w_consonant != 0;
+        t.typer.set_options_no_reset(cfg);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn keyv_typer_set_macro_enabled(typer: *mut KeyVTyper, macro_enabled: i32) {
+    if let Some(t) = unsafe { typer.as_mut() } {
+        let mut cfg = t.typer.config().clone();
+        cfg.macro_enabled = macro_enabled != 0;
+        t.typer.set_options_no_reset(cfg);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn keyv_typer_has_active_transform(typer: *const KeyVTyper) -> i32 {
+    let Some(t) = (unsafe { typer.as_ref() }) else {
+        return 0;
+    };
+    i32::from(t.typer.has_active_transform())
+}
+
 /// Register one macro entry. Returns 0 on success, -1 on error (null args or
 /// invalid UTF-8).
 #[unsafe(no_mangle)]

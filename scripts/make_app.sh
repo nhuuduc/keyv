@@ -12,6 +12,8 @@ if [ -n "${KEYV_BIN_PATH:-}" ]; then
 else
   if [ "${KEYV_UNIVERSAL:-0}" = "1" ] && [ -x "$APPDIR/.build/apple/Products/Release/KeyVApp" ]; then
     BIN_DIR="$APPDIR/.build/apple/Products/Release"
+  elif [ "${KEYV_UNIVERSAL:-0}" = "1" ]; then
+    BIN_DIR="$(cd "$APPDIR" && swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
   else
     BIN_DIR="$(cd "$APPDIR" && swift build -c release --show-bin-path)"
   fi

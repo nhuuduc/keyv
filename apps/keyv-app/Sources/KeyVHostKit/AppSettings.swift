@@ -3,75 +3,129 @@ import Carbon.HIToolbox
 import KeyVCore
 
 /// Global engine settings persisted to UserDefaults, with change callbacks.
-final class AppSettings: NSObject {
-    static let shared = AppSettings()
+public final class AppSettings: NSObject {
+    public static let shared = AppSettings()
+    public static let currentSchemaVersion = 2
 
     private let defaults = UserDefaults.standard
     private let changedNotification = Notification.Name("KeyVSettingsChanged")
 
-    var method: ViInputMethod {
+    override init() {
+        defaults.register(defaults: [
+            "method": ViInputMethod.telex.rawValue,
+            "orthography": ViOrthography.traditional.rawValue,
+            "macroEnabled": false,
+            "allowWAsConsonant": true,
+            "repeatedRestore": true,
+            "spellCheck": true,
+            "compatFix": true,
+            "autoCapitalize": false,
+            "beepOnModeSwitch": true,
+            "ctrlShiftSwitch": true,
+            "toggleHotKeyCode": 6,
+            "toggleHotKeyModifiers": UInt(optionKey),
+            "autoCheckUpdates": true,
+            "lastVietnameseMethod": ViInputMethod.telex.rawValue,
+            "overlayHotKeyCode": 49,
+            "overlayHotKeyModifiers": UInt(optionKey),
+            "clipboardRetentionLimit": 200,
+        ])
+        super.init()
+    }
+
+    public func migrateLegacyDefaultsIfNeeded(in targetDefaults: UserDefaults? = nil) {
+        let store = targetDefaults ?? defaults
+        guard store.integer(forKey: "settingsSchemaVersion") < Self.currentSchemaVersion else { return }
+        store.set(true, forKey: "allowWAsConsonant")
+        store.set(true, forKey: "repeatedRestore")
+        store.set(true, forKey: "spellCheck")
+        store.set(true, forKey: "compatFix")
+        store.set(Self.currentSchemaVersion, forKey: "settingsSchemaVersion")
+        if targetDefaults == nil {
+            notifyChanged()
+        }
+    }
+
+    public func resetEngineDefaults() {
+        defaults.set(ViInputMethod.telex.rawValue, forKey: "method")
+        defaults.set(ViInputMethod.telex.rawValue, forKey: "lastVietnameseMethod")
+        defaults.set(ViOrthography.traditional.rawValue, forKey: "orthography")
+        defaults.set(true, forKey: "allowWAsConsonant")
+        storeBoolAndNotify()
+    }
+
+    private func storeBoolAndNotify() {
+        defaults.set(true, forKey: "repeatedRestore")
+        defaults.set(true, forKey: "spellCheck")
+        defaults.set(true, forKey: "compatFix")
+        defaults.set(false, forKey: "autoCapitalize")
+        defaults.set(Self.currentSchemaVersion, forKey: "settingsSchemaVersion")
+        notifyChanged()
+    }
+
+    public var method: ViInputMethod {
         get { defaults.object(forKey: "method") == nil ? .telex : (ViInputMethod(rawValue: defaults.integer(forKey: "method")) ?? .telex) }
         set { defaults.set(newValue.rawValue, forKey: "method"); notifyChanged() }
     }
 
-    var orthography: ViOrthography {
+    public var orthography: ViOrthography {
         get { ViOrthography(rawValue: defaults.integer(forKey: "orthography")) ?? .traditional }
         set { defaults.set(newValue.rawValue, forKey: "orthography"); notifyChanged() }
     }
 
-    var macroEnabled: Bool {
+    public var macroEnabled: Bool {
         get { defaults.bool(forKey: "macroEnabled") }
         set { defaults.set(newValue, forKey: "macroEnabled"); notifyChanged() }
     }
 
-    var allowWAsConsonant: Bool {
+    public var allowWAsConsonant: Bool {
         get { defaults.object(forKey: "allowWAsConsonant") == nil ? true : defaults.bool(forKey: "allowWAsConsonant") }
         set { defaults.set(newValue, forKey: "allowWAsConsonant"); notifyChanged() }
     }
 
     /// Unikey repeated-key restore ("bar" → "bả" → "bar" bằng phím r lần 2).
-    var repeatedRestore: Bool {
+    public var repeatedRestore: Bool {
         get { defaults.object(forKey: "repeatedRestore") == nil ? true : defaults.bool(forKey: "repeatedRestore") }
         set { defaults.set(newValue, forKey: "repeatedRestore"); notifyChanged() }
     }
 
     /// Kiểm tra chính tả tiếng Việt & tự khôi phục từ tiếng Anh.
-    var spellCheck: Bool {
+    public var spellCheck: Bool {
         get { defaults.object(forKey: "spellCheck") == nil ? true : defaults.bool(forKey: "spellCheck") }
         set { defaults.set(newValue, forKey: "spellCheck"); notifyChanged() }
     }
 
-    /// "Sửa lỗi gợi ý (trình duyệt, Excel,...)" — chèn U+200C force-deselect
+    /// "Sửa lỗi gợi ý (trình duyệt, Excel,...)" — chèn U+202F force-deselect
     /// cho các app compatibility có inline autocomplete.
-    var compatFix: Bool {
+    public var compatFix: Bool {
         get { defaults.object(forKey: "compatFix") == nil ? true : defaults.bool(forKey: "compatFix") }
         set { defaults.set(newValue, forKey: "compatFix"); notifyChanged() }
     }
 
     /// Viết hoa chữ cái đầu câu (sau . ! ?).
-    var autoCapitalize: Bool {
+    public var autoCapitalize: Bool {
         get { defaults.bool(forKey: "autoCapitalize") }
         set { defaults.set(newValue, forKey: "autoCapitalize"); notifyChanged() }
     }
 
     /// Kêu beep khi chuyển chế độ gõ (Tiếng Việt ↔ English).
-    var beepOnModeSwitch: Bool {
+    public var beepOnModeSwitch: Bool {
         get { defaults.object(forKey: "beepOnModeSwitch") == nil ? true : defaults.bool(forKey: "beepOnModeSwitch") }
         set { defaults.set(newValue, forKey: "beepOnModeSwitch"); notifyChanged() }
     }
 
     /// Đổi nhanh Việt / Anh bằng tổ hợp Ctrl + Shift (kiểu UniKey Windows).
-    var ctrlShiftSwitch: Bool {
+    public var ctrlShiftSwitch: Bool {
         get { defaults.object(forKey: "ctrlShiftSwitch") == nil ? true : defaults.bool(forKey: "ctrlShiftSwitch") }
         set { defaults.set(newValue, forKey: "ctrlShiftSwitch"); notifyChanged() }
     }
 
-    var toggleHotKeyCode: Int {
+    public var toggleHotKeyCode: Int {
         get { defaults.object(forKey: "toggleHotKeyCode") == nil ? 6 : defaults.integer(forKey: "toggleHotKeyCode") }
         set { defaults.set(newValue, forKey: "toggleHotKeyCode"); notifyChanged() }
     }
 
-    var toggleHotKeyModifiers: UInt {
+    public var toggleHotKeyModifiers: UInt {
         get {
             guard let stored = defaults.object(forKey: "toggleHotKeyModifiers") as? UInt else {
                 return UInt(optionKey)
@@ -81,21 +135,21 @@ final class AppSettings: NSObject {
         set { defaults.set(newValue, forKey: "toggleHotKeyModifiers"); notifyChanged() }
     }
 
-    var autoCheckUpdates: Bool {
+    public var autoCheckUpdates: Bool {
         get { defaults.object(forKey: "autoCheckUpdates") == nil ? true : defaults.bool(forKey: "autoCheckUpdates") }
         set { defaults.set(newValue, forKey: "autoCheckUpdates"); notifyChanged() }
     }
 
-    var lastUpdateCheckTimestamp: Double {
+    public var lastUpdateCheckTimestamp: Double {
         get { defaults.double(forKey: "lastUpdateCheckTimestamp") }
         set { defaults.set(newValue, forKey: "lastUpdateCheckTimestamp") }
     }
 
     /// Chế độ gõ đang "hiển thị" ở menu bar: English (off) hay Vietnamese.
-    var isEnglishMode: Bool { method == .off }
+    public var isEnglishMode: Bool { method == .off }
 
     /// Nhớ phương thức VN cuối cùng để quay lại khi bật Tiếng Việt từ English.
-    var lastVietnameseMethod: ViInputMethod {
+    public var lastVietnameseMethod: ViInputMethod {
         get {
             ViInputMethod(rawValue: defaults.integer(forKey: "lastVietnameseMethod")).flatMap { $0 == .off ? nil : $0 }
                 ?? .telex
@@ -106,12 +160,12 @@ final class AppSettings: NSObject {
         }
     }
 
-    var overlayHotKeyCode: Int {
+    public var overlayHotKeyCode: Int {
         get { defaults.object(forKey: "overlayHotKeyCode") == nil ? 49 : defaults.integer(forKey: "overlayHotKeyCode") }
         set { defaults.set(newValue, forKey: "overlayHotKeyCode"); notifyChanged() }
     }
 
-    var overlayHotKeyModifiers: UInt {
+    public var overlayHotKeyModifiers: UInt {
         get {
             guard let stored = defaults.object(forKey: "overlayHotKeyModifiers") as? UInt else {
                 return UInt(optionKey)
@@ -121,7 +175,7 @@ final class AppSettings: NSObject {
         set { defaults.set(newValue, forKey: "overlayHotKeyModifiers"); notifyChanged() }
     }
 
-    var clipboardRetentionLimit: Int {
+    public var clipboardRetentionLimit: Int {
         get { defaults.object(forKey: "clipboardRetentionLimit") == nil ? 200 : defaults.integer(forKey: "clipboardRetentionLimit") }
         set { defaults.set(newValue, forKey: "clipboardRetentionLimit"); notifyChanged() }
     }
@@ -194,7 +248,13 @@ final class AppSettings: NSObject {
     }
 
     private func notifyChanged() {
-        NotificationCenter.default.post(name: changedNotification, object: self)
+        if Thread.isMainThread {
+            NotificationCenter.default.post(name: changedNotification, object: self)
+        } else {
+            DispatchQueue.main.async { [changedNotification] in
+                NotificationCenter.default.post(name: changedNotification, object: self)
+            }
+        }
     }
 
     /// Observe changes to refresh the live engine.

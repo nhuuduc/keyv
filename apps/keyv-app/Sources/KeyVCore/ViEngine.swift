@@ -17,7 +17,7 @@ public enum ViOrthography: Int, Sendable {
 
 // MARK: - Engine action (Swift-side mirror of KeyVAction)
 
-public enum ViEngineAction {
+public enum ViEngineAction: Equatable {
     /// Event flows through untouched.
     case pass
     /// Event is consumed: erase `backspaces` chars then write `chars`.
@@ -56,6 +56,10 @@ public final class ViEngine {
         keyv_typer_free(raw)
     }
 
+    public var hasActiveTransform: Bool {
+        keyv_typer_has_active_transform(raw) != 0
+    }
+
     /// Feed one character; returns the engine's decision for the host layer.
     public func process(_ ch: Character) -> ViEngineAction {
         guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1 else {
@@ -84,12 +88,18 @@ public final class ViEngine {
 
     public func setMethod(_ method: ViInputMethod) {
         keyv_typer_set_method(raw, Int32(method.rawValue))
-        reset()
     }
 
     public func setOrthography(_ orthography: ViOrthography) {
         keyv_typer_set_orthography(raw, Int32(orthography.rawValue))
-        reset()
+    }
+
+    public func setAllowWAsConsonant(_ allow: Bool) {
+        keyv_typer_set_allow_w_consonant(raw, allow ? 1 : 0)
+    }
+
+    public func setMacroEnabled(_ enabled: Bool) {
+        keyv_typer_set_macro_enabled(raw, enabled ? 1 : 0)
     }
 
     /// Compose option bits from stored state; called on settings change.
