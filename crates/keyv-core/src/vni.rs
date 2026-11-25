@@ -33,6 +33,22 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
         buf.record_raw(ch);
         if buf.passthrough {
             buf.push(ch);
+            buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
+            return EngineAction::Pass;
+        }
+        if cfg.spell_check
+            && ch.is_ascii_uppercase()
+            && buf.raw_keys.len() >= 3
+            && buf.raw_keys[..buf.raw_keys.len() - 1]
+                .iter()
+                .any(|c| c.is_ascii_lowercase())
+        {
+            buf.push(ch);
+            if buf.has_any_transform() {
+                return buf.restore_to_raw_from(&displayed, Some(ch));
+            }
+            buf.passthrough = true;
+            buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
             return EngineAction::Pass;
         }
         buf.push(ch);
@@ -41,6 +57,7 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
                 return buf.restore_to_raw_from(&displayed, Some(ch));
             }
             buf.passthrough = true;
+            buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
             return displayed.diff_to_buf(buf, Some(ch));
         }
         let _ = rebalance_after_push(buf, cfg.orthography);
@@ -73,7 +90,19 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
             if digit == '0' {
                 if let Some(idx) = buf.last_tone_idx() {
                     buf.record_raw(ch);
+                    let coda: Vec<char> = buf.chars[syl.coda_start..]
+                        .iter()
+                        .map(ViChar::base_lc)
+                        .collect();
+                    if cfg.spell_check
+                        && matches!(coda.as_slice(), ['c'] | ['c', 'h'] | ['p'] | ['t'])
+                    {
+                        return buf.restore_to_raw_from(&displayed, Some(ch));
+                    }
                     buf.clear_tone_and_implicit_hat_at(idx);
+                    if !cfg.spell_check || buf.has_explicit_mark() || syl.coda_start < buf.len() {
+                        buf.sync_raw_keys_from_chars(cfg.method);
+                    }
                     return displayed.diff_to_buf(buf, Some(ch));
                 }
                 fallback_vni_digit(buf, cfg, ch, &displayed)
@@ -86,21 +115,35 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
                     '5' => Tone::Nang,
                     _ => unreachable!(),
                 };
-                if cfg.repeated_restore
-                    && let Some(idx) = buf.last_with_tone(tone)
-                {
-                    buf.record_raw(ch);
-                    buf.clear_tone_and_implicit_hat_at(idx);
-                    let target = format!("{}{ch}", buf.render_all());
-                    finish_vni_escape(buf, cfg, ch);
-                    return displayed.diff_to_str(&target, Some(ch));
+                if let Some(existing_idx) = buf.last_tone_idx() {
+                    let existing_tone = buf.chars[existing_idx].tone;
+                    if existing_tone == tone && cfg.repeated_restore {
+                        buf.record_raw(ch);
+                        buf.clear_tone_and_implicit_hat_at(existing_idx);
+                        let target = format!("{}{ch}", buf.render_all());
+                        finish_vni_escape(buf, ch);
+                        return displayed.diff_to_str(&target, Some(ch));
+                    }
+                    if existing_tone != tone && cfg.spell_check && !buf.has_explicit_mark() {
+                        buf.record_raw(ch);
+                        return buf.restore_to_raw_from(&displayed, Some(ch));
+                    }
                 }
                 if cfg.spell_check && !buf.is_valid_vietnamese() {
                     return fallback_vni_digit(buf, cfg, ch, &displayed);
                 }
                 buf.record_raw(ch);
                 let _ = apply_tone(buf, tone, cfg.orthography, ch);
-                if cfg.spell_check && !buf.is_valid_vietnamese() {
+                let invalid_stop_tone = {
+                    let syl2 = buf.analyze();
+                    let coda: Vec<char> = buf.chars[syl2.coda_start..]
+                        .iter()
+                        .map(ViChar::base_lc)
+                        .collect();
+                    matches!(coda.as_slice(), ['c'] | ['c', 'h'] | ['p'] | ['t'])
+                        && !matches!(tone, Tone::Sac | Tone::Nang)
+                };
+                if cfg.spell_check && (invalid_stop_tone || !buf.is_valid_vietnamese()) {
                     return buf.restore_to_raw_from(&displayed, Some(ch));
                 }
                 displayed.diff_to_buf(buf, Some(ch))
@@ -116,6 +159,17 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
                 }
             };
             let target_opt = if digit == '7'
+                && syl.nucleus.len() == 2
+                && buf.chars[syl.nucleus[0]].base_lc() == 'u'
+                && buf.chars[syl.nucleus[1]].base_lc() == 'u'
+                && !buf.chars[syl.nucleus[1]].horn
+            {
+                if !buf.chars[syl.nucleus[0]].horn {
+                    Some(syl.nucleus[0])
+                } else {
+                    None
+                }
+            } else if digit == '7'
                 && syl.nucleus.len() == 3
                 && buf.chars[syl.nucleus[0]].base_lc() == 'u'
                 && buf.chars[syl.nucleus[1]].base_lc() == 'o'
@@ -194,7 +248,7 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
                             }
                             let _ = reanchor_existing_tone(buf, cfg.orthography);
                             let target = format!("{}{ch}", buf.render_all());
-                            finish_vni_escape(buf, cfg, ch);
+                            finish_vni_escape(buf, ch);
                             return displayed.diff_to_str(&target, Some(ch));
                         }
                     }
@@ -213,26 +267,31 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
             } else if !buf.is_empty()
                 && buf.chars[0].base_lc() == 'd'
                 && !buf.chars[0].stroke
-                && (!cfg.spell_check || buf.is_valid_vietnamese())
+                && (!cfg.spell_check || (!syl.nucleus.is_empty() && buf.is_valid_vietnamese()))
             {
                 buf.record_raw(ch);
                 buf.chars[0].stroke = true;
                 if cfg.spell_check && !buf.is_valid_vietnamese() {
                     return buf.restore_to_raw_from(&displayed, Some(ch));
                 }
+                let _ = rebalance_after_push(buf, cfg.orthography);
                 displayed.diff_to_buf(buf, Some(ch))
             } else if cfg.repeated_restore && buf.last().is_some_and(|c| c.stroke) {
                 buf.record_raw(ch);
                 let idx = buf.len() - 1;
                 buf.chars[idx].stroke = false;
                 let target = format!("{}{ch}", buf.render_all());
-                finish_vni_escape(buf, cfg, ch);
+                finish_vni_escape(buf, ch);
                 displayed.diff_to_str(&target, Some(ch))
-            } else if cfg.repeated_restore && !buf.is_empty() && buf.chars[0].stroke {
+            } else if cfg.repeated_restore
+                && !buf.is_empty()
+                && buf.chars[0].stroke
+                && !syl.nucleus.is_empty()
+            {
                 buf.record_raw(ch);
                 buf.chars[0].stroke = false;
                 let target = format!("{}{ch}", buf.render_all());
-                finish_vni_escape(buf, cfg, ch);
+                finish_vni_escape(buf, ch);
                 displayed.diff_to_str(&target, Some(ch))
             } else {
                 fallback_vni_digit(buf, cfg, ch, &displayed)
@@ -242,16 +301,12 @@ pub fn step(buf: &mut WordBuffer, cfg: &Config, ch: char) -> EngineAction {
     }
 }
 
-fn finish_vni_escape(buf: &mut WordBuffer, cfg: &Config, last_ch: char) {
-    if cfg.spell_check {
-        let current = format!("{}{last_ch}", buf.render_all());
-        buf.raw_keys = current.chars().collect();
-        buf.chars = current.chars().map(ViChar::from_char).collect();
-        buf.leading_w_expansion = false;
-        buf.passthrough = true;
-    } else {
-        buf.clear();
-    }
+fn finish_vni_escape(buf: &mut WordBuffer, last_ch: char) {
+    let current = format!("{}{last_ch}", buf.render_all());
+    buf.raw_keys = current.chars().collect();
+    buf.chars = current.chars().map(ViChar::from_char).collect();
+    buf.leading_w_expansion = false;
+    buf.passthrough = true;
 }
 
 fn fallback_vni_digit(
@@ -260,15 +315,12 @@ fn fallback_vni_digit(
     ch: char,
     displayed: &DisplayedSnapshot,
 ) -> EngineAction {
-    if cfg.spell_check {
-        buf.record_raw(ch);
-        if buf.has_any_transform() {
-            return buf.restore_to_raw_from(displayed, Some(ch));
-        }
-        buf.push(ch);
-        buf.passthrough = true;
-        return EngineAction::Pass;
+    buf.record_raw(ch);
+    if cfg.spell_check && buf.has_any_transform() {
+        return buf.restore_to_raw_from(displayed, Some(ch));
     }
-    buf.clear();
+    buf.push(ch);
+    buf.passthrough = true;
+    buf.raw_keys = buf.chars.iter().map(|c| c.ch).collect();
     EngineAction::Pass
 }
