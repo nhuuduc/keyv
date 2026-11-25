@@ -63,6 +63,7 @@ public final class ViEngine {
     /// Feed one character; returns the engine's decision for the host layer.
     public func process(_ ch: Character) -> ViEngineAction {
         guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1 else {
+            keyv_typer_reset(raw)
             return .pass
         }
         let action = keyv_process_char(raw, scalar.value)

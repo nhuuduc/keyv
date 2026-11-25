@@ -9,9 +9,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>app.keyv.host</string>
 	<key>CFBundleVersion</key>
-	<string>0.3.3</string>
+	<string>0.3.4</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.3</string>
+	<string>0.3.4</string>
 	<key>CFBundleExecutable</key>
 	<string>KeyVApp</string>
 	<key>CFBundleIconFile</key>
@@ -31,5 +31,9 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 </dict>
 </plist>

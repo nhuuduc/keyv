@@ -67,6 +67,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private var typingMenuItem: NSMenuItem?
+    private var remoteMenuItem: NSMenuItem?
+    private var remoteModeItems: [RemoteDesktopMode: NSMenuItem] = [:]
     private var overlayMenuItem: NSMenuItem?
     private var settingsMenuItem: NSMenuItem?
     private var updateMenuItem: NSMenuItem?
@@ -89,6 +91,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.disableAutomaticTermination("KeyV EventTap")
         let settings = AppSettings.shared
         if Bundle.main.bundleIdentifier == "app.keyv.host" {
             settings.migrateLegacyDefaultsIfNeeded()
@@ -121,7 +124,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceAppsChanged(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceAppsChanged(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
         loadMacroFile()
         UpdateService.shared.startAutomaticChecks()
 
@@ -204,15 +216,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func pollAccessibility() {
         guard engine != nil else { return }
         guard Self.isAccessibilityGranted() else {
+            let hadTap = (tap != nil)
             tap?.uninstall()
             tap = nil
-            PermissionModel.shared.status = .permissionRequired
-            refreshMenuBar()
+            if PermissionModel.shared.status != .permissionRequired || hadTap {
+                PermissionModel.shared.status = .permissionRequired
+                refreshMenuBar()
+            }
             return
         }
-        installTypingPipeline()
-        tap?.refreshSecureInputState()
-        refreshMenuBar()
+        if tap == nil {
+            installTypingPipeline()
+            refreshMenuBar()
+        } else {
+            tap?.refreshSecureInputState()
+        }
+    }
+
+    @objc private func workspaceAppsChanged(_ note: Notification) {
+        RemoteInputDetector.shared.invalidateAll()
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
     }
 
     public func applicationDidBecomeActive(_ notification: Notification) {
@@ -235,6 +260,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         typingItem.target = self
         typingMenuItem = typingItem
         menu.addItem(typingItem)
+
+        let remoteItem = NSMenuItem(title: "Nhập liệu từ xa", action: nil, keyEquivalent: "")
+        remoteItem.image = NSImage(
+            systemSymbolName: "iphone.radiowaves.left.and.right",
+            accessibilityDescription: "Nhập liệu từ xa"
+        )
+        let remoteSubmenu = NSMenu(title: "Nhập liệu từ xa")
+        for mode in RemoteDesktopMode.allCases {
+            let modeItem = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(selectRemoteDesktopMode(_:)),
+                keyEquivalent: ""
+            )
+            modeItem.target = self
+            modeItem.tag = mode.rawValue
+            remoteModeItems[mode] = modeItem
+            remoteSubmenu.addItem(modeItem)
+        }
+        remoteSubmenu.addItem(.separator())
+        let openRemoteSettingsItem = NSMenuItem(
+            title: "Tùy chỉnh trong Cài đặt Hệ thống…",
+            action: #selector(showSystemSettings),
+            keyEquivalent: ""
+        )
+        openRemoteSettingsItem.target = self
+        remoteSubmenu.addItem(openRemoteSettingsItem)
+        remoteItem.submenu = remoteSubmenu
+        remoteMenuItem = remoteItem
+        menu.addItem(remoteItem)
         menu.addItem(.separator())
 
         let overlay = NSMenuItem(title: "Lịch sử clipboard…", action: #selector(showOverlay), keyEquivalent: "")
@@ -487,6 +541,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        if let remoteMenuItem {
+            let runningServers = RemoteInputDetector.shared.cachedRunningServers()
+            let shouldShowRemote = !runningServers.isEmpty || settings.remoteDesktopMode != .smartAuto
+            remoteMenuItem.isHidden = !shouldShowRemote
+            if shouldShowRemote {
+                let serverLabel = runningServers.first?.displayName ?? "Từ xa"
+                let modeShort: String
+                switch settings.remoteDesktopMode {
+                case .smartAuto: modeShort = "Tự động thông minh"
+                case .phoneKeyboardOnly: modeShort = "Nhường bàn phím ĐT"
+                case .alwaysKeyV: modeShort = "Luôn dùng KeyV"
+                }
+                remoteMenuItem.title = "Từ xa (\(serverLabel)): \(modeShort)"
+                for (mode, item) in remoteModeItems {
+                    item.state = (mode == settings.remoteDesktopMode) ? .on : .off
+                }
+            }
+        }
+
         let updateTitle = updateMenuTitle()
         let updateSymbol = hasUpdate ? "arrow.down.circle.fill" : "arrow.triangle.2.circlepath"
         updateMenuItem?.title = updateTitle
@@ -525,6 +598,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func checkForUpdates() {
         UpdateService.shared.showUpdateWindowAndCheck()
+    }
+
+    @objc private func selectRemoteDesktopMode(_ sender: NSMenuItem) {
+        guard let mode = RemoteDesktopMode(rawValue: sender.tag) else { return }
+        AppSettings.shared.remoteDesktopMode = mode
+    }
+
+    @objc private func showSystemSettings() {
+        SettingsModel.shared.selectedTab = .system
+        showSettings()
     }
 
     @objc private func showSettings() {
@@ -684,6 +767,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     public func menuNeedsUpdate(_ menu: NSMenu) {
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] _ in
+            self?.refreshMenuBar()
+        }
         refreshMenuBar()
     }
 }

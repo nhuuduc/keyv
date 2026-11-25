@@ -640,6 +640,39 @@ private struct SettingsSystemTab: View {
             VStack(alignment: .leading, spacing: 10) {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Label("Nhập liệu từ xa (RustDesk / Điện thoại)", systemImage: "iphone.radiowaves.left.and.right")
+                                .font(.headline)
+                            Spacer()
+                            remoteServerStatusBadge
+                        }
+
+                        Divider()
+
+                        HStack(spacing: 10) {
+                            Text("Chế độ xử lý")
+                                .font(.callout.weight(.medium))
+                            Spacer()
+                            Picker("Chế độ xử lý", selection: $model.remoteDesktopMode) {
+                                ForEach(RemoteDesktopMode.allCases, id: \.self) { mode in
+                                    Text(mode.shortTitle).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+
+                        Text(model.remoteDesktopMode.detailSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Label("Cập nhật tự động", systemImage: "arrow.triangle.2.circlepath.circle")
                                 .font(.headline)
@@ -758,6 +791,32 @@ private struct SettingsSystemTab: View {
             }
         } message: {
             Text("Tất cả văn bản, hình ảnh và đường dẫn tệp đã lưu trong cơ sở dữ liệu clipboard của KeyV sẽ bị xóa vĩnh viễn và không thể khôi phục.")
+        }
+        .onAppear {
+            model.refreshRunningRemoteServers()
+        }
+    }
+
+    @ViewBuilder
+    private var remoteServerStatusBadge: some View {
+        if let primary = model.activeRemoteServers.first {
+            let extraCount = model.activeRemoteServers.count - 1
+            let suffix = extraCount > 0 ? " +\(extraCount)" : ""
+            Label("\(primary.displayName)\(suffix) đang chạy", systemImage: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.green)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(Color.green.opacity(0.13), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.green.opacity(0.32), lineWidth: 1))
+        } else {
+            Text("Tự động khi kết nối")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color(nsColor: .quaternaryLabelColor).opacity(0.35), in: Capsule())
         }
     }
 
@@ -945,6 +1004,8 @@ public final class SettingsModel: NSObject, ObservableObject {
     @Published public var autoCapitalize: Bool { didSet { guard !syncing else { return }; AppSettings.shared.autoCapitalize = autoCapitalize } }
     @Published public var beepOnModeSwitch: Bool { didSet { guard !syncing else { return }; AppSettings.shared.beepOnModeSwitch = beepOnModeSwitch } }
     @Published public var compatFix: Bool { didSet { guard !syncing else { return }; AppSettings.shared.compatFix = compatFix } }
+    @Published public var remoteDesktopMode: RemoteDesktopMode { didSet { guard !syncing else { return }; AppSettings.shared.remoteDesktopMode = remoteDesktopMode } }
+    @Published public private(set) var activeRemoteServers: [RemoteSourceKind] = []
 
     /// "Đặt dấu òa, úy (thay vì oà, uý)" — Traditional khi bật, Modern khi tắt.
     @Published public var useStatefulOrthography: Bool {
@@ -996,6 +1057,8 @@ public final class SettingsModel: NSObject, ObservableObject {
 
     private var syncing = false
     private var seenAppsObserver: NSObjectProtocol?
+    private var workspaceLaunchObserver: NSObjectProtocol?
+    private var workspaceTermObserver: NSObjectProtocol?
 
     public override init() {
         let s = AppSettings.shared
@@ -1015,6 +1078,8 @@ public final class SettingsModel: NSObject, ObservableObject {
         autoCapitalize = s.autoCapitalize
         beepOnModeSwitch = s.beepOnModeSwitch
         compatFix = s.compatFix
+        remoteDesktopMode = s.remoteDesktopMode
+        activeRemoteServers = RemoteInputDetector.shared.runningRemoteServers()
         useStatefulOrthography = (s.orthography == .traditional)
         isEnglishMode = (s.method == .off)
         launchAtStartup = SMAppServiceHelper.isEnabled()
@@ -1027,7 +1092,29 @@ public final class SettingsModel: NSObject, ObservableObject {
                 self?.rebuildRows()
             }
         }
+        let wsNC = NSWorkspace.shared.notificationCenter
+        workspaceLaunchObserver = wsNC.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                RemoteInputDetector.shared.invalidateAll()
+                self?.refreshRunningRemoteServers()
+            }
+        }
+        workspaceTermObserver = wsNC.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                RemoteInputDetector.shared.invalidateAll()
+                self?.refreshRunningRemoteServers()
+            }
+        }
         loadMacroFile()
+    }
+
+    public func refreshRunningRemoteServers() {
+        activeRemoteServers = RemoteInputDetector.shared.cachedRunningServers()
+        RemoteInputDetector.shared.refreshRunningServersAsync { [weak self] detected in
+            self?.activeRemoteServers = detected
+        }
     }
 
     @objc private func syncSettings() {
@@ -1046,6 +1133,7 @@ public final class SettingsModel: NSObject, ObservableObject {
         autoCapitalize = s.autoCapitalize
         beepOnModeSwitch = s.beepOnModeSwitch
         compatFix = s.compatFix
+        remoteDesktopMode = s.remoteDesktopMode
         ctrlShiftSwitch = s.ctrlShiftSwitch
         autoCheckUpdates = s.autoCheckUpdates
         toggleHotKeyCode = s.toggleHotKeyCode
