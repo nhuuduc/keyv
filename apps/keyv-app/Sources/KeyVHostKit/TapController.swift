@@ -38,10 +38,15 @@ public final class TapController: NSObject {
     private var remoteAutoReplaceUntilNs: UInt64 = 0
     private var lastRemoteBackspaceNs: UInt64 = 0
     private var remoteBackspaceBurstCount: Int = 0
+    private var lastRemoteVkBackNs: UInt64 = 0
+    private var pendingRustDeskSentinelOneNs: UInt64 = 0
+    private var pendingRustDeskSentinelAfterBack = false
 
     private static let postReplaceSerializeWindowNs: UInt64 = 80_000_000
     private static let remoteBackspaceBurstWindowNs: UInt64 = 15_000_000
     private static let remoteAutoReplaceWindowNs: UInt64 = 25_000_000
+    private static let rustDeskSentinelAfterBackWindowNs: UInt64 = 60_000_000
+    private static let rustDeskSentinelFollowupWindowNs: UInt64 = 25_000_000
     private static let blockingModifiers: CGEventFlags = [
         .maskCommand,
         .maskControl,
@@ -186,7 +191,8 @@ public final class TapController: NSObject {
         }
 
         // Synthetic events must reach the target app without re-entering the engine.
-        if event.getIntegerValueField(.eventSourceUserData) == EventInjector.syntheticMarker {
+        let eventUserData = event.getIntegerValueField(.eventSourceUserData)
+        if eventUserData == EventInjector.syntheticMarker {
             return Unmanaged.passUnretained(event)
         }
         let sourceID = CGEventSourceStateID(
@@ -197,21 +203,27 @@ public final class TapController: NSObject {
 
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let sourcePID = pid_t(truncatingIfNeeded: event.getIntegerValueField(.eventSourceUnixProcessID))
-        let remoteSource = remoteDetector.sourceKind(for: sourcePID, nowNs: nowNs)
+        let remoteSource = remoteDetector.sourceKind(
+            for: sourcePID,
+            eventUserData: eventUserData,
+            nowNs: nowNs
+        )
         let isRemote = remoteSource.isRemote
         if isRemote {
             lastRemoteSource = remoteSource
         }
 
-        if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
-            engine.reset()
-            lastReplaceUptimeNs = 0
-            lastEventWasRemote = true
-            return Unmanaged.passUnretained(event)
+        let withinWallWindow = lastReplaceUptimeNs != 0
+            && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
+        if !withinWallWindow {
+            remoteZeroKeyConsumedCount = 0
         }
 
         if type == .keyUp {
             let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if isRemote && remoteDesktopMode == .phoneKeyboardOnly && !withinWallWindow {
+                return Unmanaged.passUnretained(event)
+            }
             if isRemote && keyCode == 0 && remoteZeroKeyConsumedCount > 0 {
                 remoteZeroKeyConsumedCount -= 1
                 return nil
@@ -220,6 +232,9 @@ public final class TapController: NSObject {
         }
 
         if type == .flagsChanged {
+            if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
+                return Unmanaged.passUnretained(event)
+            }
             handleFlagsChanged(event.flags)
             return Unmanaged.passUnretained(event)
         }
@@ -288,6 +303,9 @@ public final class TapController: NSObject {
             engine.reset()
             remoteMobileWordActive = false
             remoteAutoReplaceUntilNs = 0
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
+            lastRemoteVkBackNs = 0
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
@@ -300,8 +318,6 @@ public final class TapController: NSObject {
         }
 
         let eventTimeNs = event.timestamp != 0 ? event.timestamp : nowNs
-        let withinWallWindow = lastReplaceUptimeNs != 0
-            && (nowNs &- lastReplaceUptimeNs) <= Self.postReplaceSerializeWindowNs
         let withinEventTsWindow = event.timestamp == 0
             || lastReplaceEventTs == 0
             || (event.timestamp >= lastReplaceEventTs
@@ -312,6 +328,21 @@ public final class TapController: NSObject {
             || (remoteZeroKeyString == "\u{0008}" || remoteZeroKeyString == "\u{007F}")
 
         if isBackspace {
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
+            if isRemote {
+                lastRemoteVkBackNs = eventTimeNs
+            }
+            if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
+                engine.reset()
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: true,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
+            }
             if isRemote && remoteDesktopMode == .smartAuto {
                 if lastRemoteBackspaceNs != 0
                     && eventTimeNs >= lastRemoteBackspaceNs
@@ -324,32 +355,40 @@ public final class TapController: NSObject {
 
                 if remoteMobileWordActive {
                     engine.reset()
-                    lastReplaceUptimeNs = 0
-                    return Unmanaged.passUnretained(event)
+                    return passOrSerialize(
+                        event,
+                        keyCode: keyCode,
+                        isRemote: true,
+                        withinPostReplaceWindow: withinPostReplaceWindow,
+                        proxy: proxy
+                    )
                 }
                 if remoteBackspaceBurstCount >= 2 {
                     engine.reset()
-                    lastReplaceUptimeNs = 0
                     remoteAutoReplaceUntilNs = eventTimeNs &+ Self.remoteAutoReplaceWindowNs
-                    return Unmanaged.passUnretained(event)
+                    return passOrSerialize(
+                        event,
+                        keyCode: keyCode,
+                        isRemote: true,
+                        withinPostReplaceWindow: withinPostReplaceWindow,
+                        proxy: proxy
+                    )
                 }
             }
             engine.processBackspace()
-            if withinPostReplaceWindow {
-                consumeKey(keyCode, isRemote: isRemote)
-                injector.postClonedEvent(
-                    event,
-                    triggerTimestamp: event.timestamp,
-                    proxy: proxy,
-                    sanitizeRemoteFlags: isRemote
-                )
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
             engine.reset()
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
@@ -362,6 +401,9 @@ public final class TapController: NSObject {
             remoteAutoReplaceUntilNs = 0
             lastRemoteBackspaceNs = 0
             remoteBackspaceBurstCount = 0
+            lastRemoteVkBackNs = 0
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
             lastReplaceUptimeNs = 0
             return Unmanaged.passUnretained(event)
         }
@@ -384,20 +426,29 @@ public final class TapController: NSObject {
             remoteAutoReplaceUntilNs = 0
             lastRemoteBackspaceNs = 0
             remoteBackspaceBurstCount = 0
+            lastRemoteVkBackNs = 0
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
+            if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
+                engine.reset()
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: true,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
+            }
             let action = engine.process(boundaryChar)
             switch action {
             case .pass:
-                if withinPostReplaceWindow {
-                    consumeKey(keyCode, isRemote: isRemote)
-                    injector.postClonedEvent(
-                        event,
-                        triggerTimestamp: event.timestamp,
-                        proxy: proxy,
-                        sanitizeRemoteFlags: isRemote
-                    )
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: isRemote,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
             case .replace(let backspaces, let chars):
                 var wordChars = chars
                 if wordChars.last == boundaryChar {
@@ -424,6 +475,100 @@ public final class TapController: NSObject {
             }
         }
 
+        let characters = remoteZeroKeyString ?? event.keyboardString()
+        if remoteSource == .rustDesk && keyCode == 0 && !characters.isEmpty {
+            let recentVkBack = lastRemoteVkBackNs != 0
+                && eventTimeNs >= lastRemoteVkBackNs
+                && (eventTimeNs &- lastRemoteVkBackNs) <= Self.rustDeskSentinelAfterBackWindowNs
+
+            if characters.count >= 2 && characters.first == "1" {
+                let tail = String(characters.dropFirst())
+                if let secondScalar = tail.unicodeScalars.first,
+                   Self.isMobileComposedScalar(secondScalar)
+                    || (recentVkBack && Self.isASCIIAlphabetic(secondScalar)) {
+                    pendingRustDeskSentinelOneNs = 0
+                    pendingRustDeskSentinelAfterBack = false
+                    lastRemoteVkBackNs = 0
+                    lastRemoteBackspaceNs = 0
+                    remoteBackspaceBurstCount = 0
+                    engine.reset()
+                    consumeKey(0, isRemote: true)
+                    lastReplaceUptimeNs = nowNs
+                    lastReplaceEventTs = event.timestamp
+                    if remoteDesktopMode == .smartAuto {
+                        remoteMobileWordActive = !Self.endsWithWordBoundary(tail)
+                    }
+                    injector.realize(
+                        .replace(backspaces: 0, chars: tail),
+                        pid: targetPID,
+                        bundleID: targetBundleID,
+                        triggerTimestamp: event.timestamp,
+                        proxy: proxy,
+                        isRemote: true
+                    )
+                    return nil
+                }
+            }
+
+            if pendingRustDeskSentinelOneNs != 0 {
+                let deltaNs = eventTimeNs >= pendingRustDeskSentinelOneNs
+                    ? (eventTimeNs &- pendingRustDeskSentinelOneNs)
+                    : UInt64.max
+                let afterBack = pendingRustDeskSentinelAfterBack
+                pendingRustDeskSentinelOneNs = 0
+                pendingRustDeskSentinelAfterBack = false
+                if deltaNs <= Self.rustDeskSentinelFollowupWindowNs,
+                   let firstScalar = characters.unicodeScalars.first,
+                   Self.isMobileComposedScalar(firstScalar)
+                    || (afterBack && Self.isASCIIAlphabetic(firstScalar)) {
+                    lastRemoteVkBackNs = 0
+                    lastRemoteBackspaceNs = 0
+                    remoteBackspaceBurstCount = 0
+                    engine.reset()
+                    consumeKey(0, isRemote: true)
+                    lastReplaceUptimeNs = nowNs
+                    lastReplaceEventTs = event.timestamp
+                    if remoteDesktopMode == .smartAuto && Self.isMobileComposedScalar(firstScalar) {
+                        remoteMobileWordActive = !Self.endsWithWordBoundary(characters)
+                    } else if remoteDesktopMode != .phoneKeyboardOnly
+                        && characters.unicodeScalars.count == 1
+                        && Self.isASCIIAlphabetic(firstScalar),
+                       let singleCh = characters.first {
+                        _ = engine.process(singleCh)
+                    }
+                    injector.realize(
+                        .replace(backspaces: 1, chars: characters),
+                        pid: targetPID,
+                        bundleID: targetBundleID,
+                        triggerTimestamp: event.timestamp,
+                        proxy: proxy,
+                        isRemote: true
+                    )
+                    return nil
+                }
+            }
+
+            if characters == "1" {
+                pendingRustDeskSentinelOneNs = eventTimeNs
+                pendingRustDeskSentinelAfterBack = recentVkBack
+            }
+        } else {
+            pendingRustDeskSentinelOneNs = 0
+            pendingRustDeskSentinelAfterBack = false
+        }
+        lastRemoteVkBackNs = 0
+
+        if isRemote && remoteDesktopMode == .phoneKeyboardOnly {
+            engine.reset()
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: true,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
+        }
+
         let inAutoReplaceBurst = isRemote
             && remoteDesktopMode == .smartAuto
             && remoteAutoReplaceUntilNs != 0
@@ -431,75 +576,105 @@ public final class TapController: NSObject {
         lastRemoteBackspaceNs = 0
         remoteBackspaceBurstCount = 0
 
-        let characters = remoteZeroKeyString ?? event.keyboardString()
         if characters.isEmpty {
             engine.reset()
-            lastReplaceUptimeNs = 0
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         if characters.utf16.count > 1 || characters.unicodeScalars.count > 1 {
             engine.reset()
-            lastReplaceUptimeNs = 0
             if isRemote && remoteDesktopMode == .smartAuto {
                 remoteMobileWordActive = !Self.endsWithWordBoundary(characters)
             }
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         guard let scalar = characters.unicodeScalars.first, let ch = characters.first else {
             engine.reset()
-            lastReplaceUptimeNs = 0
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         if scalar.value < 0x20 || scalar.value == 0x7F {
             engine.reset()
             remoteMobileWordActive = false
-            lastReplaceUptimeNs = 0
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         if scalar.value > 0x7F {
             engine.reset()
-            lastReplaceUptimeNs = 0
             if isRemote && remoteDesktopMode == .smartAuto {
                 remoteMobileWordActive = Self.isMobileComposedScalar(scalar)
             }
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         }
 
         if isRemote && remoteDesktopMode == .smartAuto {
             if inAutoReplaceBurst {
                 engine.reset()
-                lastReplaceUptimeNs = 0
                 remoteMobileWordActive = Self.isWordContinuationASCII(scalar)
-                return Unmanaged.passUnretained(event)
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: true,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
             }
             if remoteMobileWordActive {
                 engine.reset()
-                lastReplaceUptimeNs = 0
                 if !Self.isWordContinuationASCII(scalar) {
                     remoteMobileWordActive = false
                 }
-                return Unmanaged.passUnretained(event)
+                return passOrSerialize(
+                    event,
+                    keyCode: keyCode,
+                    isRemote: true,
+                    withinPostReplaceWindow: withinPostReplaceWindow,
+                    proxy: proxy
+                )
             }
         }
 
         let action = engine.process(ch)
         switch action {
         case .pass:
-            if withinPostReplaceWindow {
-                consumeKey(keyCode, isRemote: isRemote)
-                injector.postClonedEvent(
-                    event,
-                    triggerTimestamp: event.timestamp,
-                    proxy: proxy,
-                    sanitizeRemoteFlags: isRemote
-                )
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
+            return passOrSerialize(
+                event,
+                keyCode: keyCode,
+                isRemote: isRemote,
+                withinPostReplaceWindow: withinPostReplaceWindow,
+                proxy: proxy
+            )
         case .replace(let backspaces, let chars):
             consumeKey(keyCode, isRemote: isRemote)
             lastReplaceUptimeNs = nowNs
@@ -514,6 +689,26 @@ public final class TapController: NSObject {
             )
             return nil
         }
+    }
+
+    private func passOrSerialize(
+        _ event: CGEvent,
+        keyCode: Int,
+        isRemote: Bool,
+        withinPostReplaceWindow: Bool,
+        proxy: CGEventTapProxy?
+    ) -> Unmanaged<CGEvent>? {
+        if withinPostReplaceWindow {
+            consumeKey(keyCode, isRemote: isRemote)
+            injector.postClonedEvent(
+                event,
+                triggerTimestamp: event.timestamp,
+                proxy: proxy,
+                sanitizeRemoteFlags: isRemote
+            )
+            return nil
+        }
+        return Unmanaged.passUnretained(event)
     }
 
     private func consumeKey(_ keyCode: Int, isRemote: Bool) {
@@ -531,7 +726,15 @@ public final class TapController: NSObject {
         lastRemoteBackspaceNs = 0
         remoteBackspaceBurstCount = 0
         remoteZeroKeyConsumedCount = 0
+        lastRemoteVkBackNs = 0
+        pendingRustDeskSentinelOneNs = 0
+        pendingRustDeskSentinelAfterBack = false
         lastReplaceEventTs = 0
+    }
+
+    private static func isASCIIAlphabetic(_ scalar: UnicodeScalar) -> Bool {
+        let v = scalar.value
+        return (0x41...0x5A).contains(v) || (0x61...0x7A).contains(v)
     }
 
     private static func isMobileComposedScalar(_ scalar: UnicodeScalar) -> Bool {

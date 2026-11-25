@@ -44,7 +44,7 @@ public enum RemoteDesktopMode: Int, CaseIterable, Sendable {
 /// Global engine settings persisted to UserDefaults, with change callbacks.
 public final class AppSettings: NSObject {
     public static let shared = AppSettings()
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     private let defaults = UserDefaults.standard
     private let changedNotification = Notification.Name("KeyVSettingsChanged")
@@ -75,11 +75,17 @@ public final class AppSettings: NSObject {
 
     public func migrateLegacyDefaultsIfNeeded(in targetDefaults: UserDefaults? = nil) {
         let store = targetDefaults ?? defaults
-        guard store.integer(forKey: "settingsSchemaVersion") < Self.currentSchemaVersion else { return }
-        store.set(true, forKey: "allowWAsConsonant")
-        store.set(true, forKey: "repeatedRestore")
-        store.set(true, forKey: "spellCheck")
-        store.set(true, forKey: "compatFix")
+        let previousSchema = store.integer(forKey: "settingsSchemaVersion")
+        guard previousSchema < Self.currentSchemaVersion else { return }
+        if previousSchema < 2 {
+            store.set(true, forKey: "allowWAsConsonant")
+            store.set(true, forKey: "repeatedRestore")
+            store.set(true, forKey: "spellCheck")
+            store.set(true, forKey: "compatFix")
+        }
+        if store.object(forKey: "remoteDesktopMode") == nil {
+            store.set(RemoteDesktopMode.smartAuto.rawValue, forKey: "remoteDesktopMode")
+        }
         store.set(Self.currentSchemaVersion, forKey: "settingsSchemaVersion")
         if targetDefaults == nil {
             notifyChanged()

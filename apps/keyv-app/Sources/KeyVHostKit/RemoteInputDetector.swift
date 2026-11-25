@@ -46,6 +46,7 @@ public struct ProcessInspectorMetadata: Equatable, Sendable {
 
 public final class RemoteInputDetector {
     public static let shared = RemoteInputDetector()
+    public static let rustDeskEnigoUserData: Int64 = 100
 
     private static let cacheTTLNs: UInt64 = 60_000_000_000
     private static let maxCacheEntries = 512
@@ -79,7 +80,7 @@ public final class RemoteInputDetector {
     }
 
     @inline(__always)
-    public func sourceKind(for pid: pid_t, nowNs: UInt64) -> RemoteSourceKind {
+    public func sourceKind(for pid: pid_t, eventUserData: Int64 = 0, nowNs: UInt64) -> RemoteSourceKind {
         if pid <= 0 || pid == selfPID {
             return .local
         }
@@ -87,9 +88,16 @@ public final class RemoteInputDetector {
             return forced
         }
         if let entry = cache[pid], nowNs < entry.expiresAtNs {
+            if entry.kind == .local && eventUserData == Self.rustDeskEnigoUserData {
+                return .rustDesk
+            }
             return entry.kind
         }
-        return resolveAndCache(pid: pid, nowNs: nowNs)
+        let resolved = resolveAndCache(pid: pid, nowNs: nowNs)
+        if resolved == .local && eventUserData == Self.rustDeskEnigoUserData {
+            return .rustDesk
+        }
+        return resolved
     }
 
     @inline(never)

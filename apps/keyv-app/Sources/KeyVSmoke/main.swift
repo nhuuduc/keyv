@@ -932,6 +932,178 @@ do {
         }
         check(leakedStuckFlags ? "bad" : "ok", "ok", "Synthetic & cloned events strip stuck remote modifier flags (\(mode))")
     }
+
+    check(
+        detector.sourceKind(
+            for: 99_999,
+            eventUserData: RemoteInputDetector.rustDeskEnigoUserData,
+            nowNs: baseNs
+        ) == .rustDesk ? "ok" : "bad",
+        "ok",
+        "RemoteInputDetector ENIGO_INPUT_EXTRA_VALUE (100) fallback identifies RustDesk root daemon"
+    )
+
+    for mode in RemoteDesktopMode.allCases {
+        let h = makeRemoteHarness(mode: mode, bundleID: "ru.keepcoder.Telegram")
+        let sendKeySequence = { (seq: String, startTs: UInt64) -> UInt64 in
+            var cur = startTs
+            for ch in seq {
+                let ev = makeRemoteUnicodeEvent(String(ch), virtualKey: 0, keyDown: true, timestamp: cur)
+                ev.setIntegerValueField(.eventSourceUserData, value: RemoteInputDetector.rustDeskEnigoUserData)
+                if let passed = h.tap.processEventForTesting(type: .keyDown, event: ev) {
+                    let s = passed.keyboardString()
+                    _ = s
+                }
+                cur += 40_000
+            }
+            return cur
+        }
+        _ = sendKeySequence
+
+        var ts: UInt64 = 12_000_000_000
+        _ = h.sendRemote("d", 0, ts, []); ts += 60_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 100_000
+        _ = h.sendRemote("", 51, ts, []); ts += 500_000
+        _ = h.sendRemote("1", 0, ts, []); ts += 50_000
+        _ = h.sendRemote("đ", 0, ts, []); ts += 80_000_000
+        _ = h.sendRemote("u", 0, ts, []); ts += 80_000_000
+        _ = h.sendRemote("o", 0, ts, []); ts += 80_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 100_000
+        _ = h.sendRemote("", 51, ts, []); ts += 500_000
+        _ = h.sendRemote("ư", 0, ts, []); ts += 50_000
+        _ = h.sendRemote("ơ", 0, ts, []); ts += 80_000_000
+        _ = h.sendRemote("c", 0, ts, []); ts += 80_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 100_000
+        _ = h.sendRemote("", 51, ts, []); ts += 100_000
+        _ = h.sendRemote("", 51, ts, []); ts += 500_000
+        _ = h.sendRemote("ư", 0, ts, []); ts += 50_000
+        _ = h.sendRemote("ợ", 0, ts, []); ts += 50_000
+        _ = h.sendRemote("c", 0, ts, []); ts += 80_000_000
+        check(
+            h.readScreen(),
+            "được",
+            "RustDesk iOS VI EN '1' sentinel leak on dd->1đ produces clean 'được' in Telegram (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        for ch in "1được" {
+            let down = makeRemoteUnicodeEvent(String(ch), virtualKey: 0, keyDown: true, timestamp: ts)
+            down.setIntegerValueField(.eventSourceUserData, value: RemoteInputDetector.rustDeskEnigoUserData)
+            if let passed = h.tap.processEventForTesting(type: .keyDown, event: down) {
+                let s = passed.keyboardString()
+                h.injector.eventSink?(.unicode(units: Array(s.utf16), keyDown: true, flags: 0, timestamp: ts))
+            }
+            ts += 40_000
+        }
+        check(
+            h.readScreen(),
+            "được",
+            "RustDesk enigo::key_sequence('1được') keyDown-only grapheme stream strips sentinel '1' (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        _ = h.sendRemote("1được", 0, ts, [])
+        check(
+            h.readScreen(),
+            "được",
+            "RustDesk single-CGEvent '1được' strips sentinel '1' (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 1_000_000
+        _ = h.sendRemote("1", 0, ts, []); ts += 50_000
+        _ = h.sendRemote("d", 0, ts, []); ts += 90_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 500_000
+        _ = h.sendRemote("đ", 0, ts, []); ts += 90_000_000
+        _ = h.sendRemote("c", 0, ts, [])
+        check(
+            h.readScreen(),
+            "đc",
+            "RustDesk VK_BACK + '1d' ASCII sentinel leak strips '1' cleanly (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        for ch in "123 100đ" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 40_000
+        }
+        check(
+            h.readScreen(),
+            "123 100đ",
+            "Intentional numbers '123 100đ' never lose '1' (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        for ch in "1abc234" {
+            _ = h.sendRemote(String(ch), 0, ts, [])
+            ts += 40_000
+        }
+        check(
+            h.readScreen(),
+            "1abc234",
+            "Clipboard keystroke string '1abc234' without VK_BACK keeps '1' (\(mode))"
+        )
+
+        h.clearScreen()
+        ts += 200_000_000
+        _ = h.sendRemote("1", 0, ts, [])
+        ts += 250_000_000
+        _ = h.sendRemote("d", 0, ts, []); ts += 90_000_000
+        _ = h.sendRemote("", 51, ts, []); ts += 500_000
+        _ = h.sendRemote("đ", 0, ts, [])
+        check(
+            h.readScreen(),
+            "1đ",
+            "Human-paced '1' then 250ms later 'dd' ('1đ' = 1 đồng) preserves '1' (\(mode))"
+        )
+    }
+
+    do {
+        let hVIEN = makeRemoteHarness(mode: .smartAuto, bundleID: "ru.keepcoder.Telegram")
+        var ts: UInt64 = 15_000_000_000
+        _ = hVIEN.sendRemote("1", 0, ts, []); ts += 40_000
+        for ch in "được " {
+            _ = hVIEN.sendRemote(String(ch), 0, ts, []); ts += 40_000
+        }
+        ts += 100_000_000
+        for ch in "tiếng việt hãy lên " {
+            _ = hVIEN.sendRemote(String(ch), 0, ts, []); ts += 20_000_000
+        }
+        _ = hVIEN.sendRemote("c", 0, ts, []); ts += 30_000_000
+        _ = hVIEN.sendRemote("a", 0, ts, []); ts += 30_000_000
+        _ = hVIEN.sendRemote("", 51, ts, []); ts += 200_000
+        _ = hVIEN.sendRemote("á", 0, ts, []); ts += 30_000_000
+        _ = hVIEN.sendRemote("", 51, ts, []); ts += 200_000
+        for ch in "ase " {
+            _ = hVIEN.sendRemote(String(ch), 0, ts, []); ts += 50_000
+        }
+        _ = hVIEN.sendRemote("d", 0, ts, []); ts += 30_000_000
+        _ = hVIEN.sendRemote("", 51, ts, []); ts += 200_000
+        _ = hVIEN.sendRemote("đ", 0, ts, []); ts += 30_000_000
+        _ = hVIEN.sendRemote("c", 0, ts, [])
+        check(
+            hVIEN.readScreen(),
+            "được tiếng việt hãy lên case đc",
+            "Full iOS VI EN sentence 'được tiếng việt hãy lên case đc' in SmartAuto"
+        )
+
+        let hEN = makeRemoteHarness(mode: .smartAuto, bundleID: "ru.keepcoder.Telegram")
+        ts += 200_000_000
+        for ch in "dduowcj tieengs vieetj hayx lene case ddc" {
+            _ = hEN.sendRemote(String(ch), 0, ts, [])
+            ts += 25_000_000
+        }
+        check(
+            hEN.readScreen(),
+            "được tiếng việt hãy lên case đc",
+            "Full iOS EN Telex sentence 'được tiếng việt hãy lên case đc' in SmartAuto"
+        )
+    }
 }
 
 do {
